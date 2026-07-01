@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "multilingual-rag"
+version = "0.1.0"
+description = "Production-ready multilingual RAG pipeline with OpenAI and ChromaDB."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [
+  { name = "Multilingual RAG Team" }
+]
+dependencies = [
+  "beautifulsoup4>=4.12.3",
+  "chromadb>=0.5.23",
+  "fastapi>=0.115.6",
+  "langdetect>=1.0.9",
+  "openai>=1.59.7",
+  "pydantic>=2.10.4",
+  "pydantic-settings>=2.7.1",
+  "pypdf>=5.1.0",
+  "python-docx>=1.1.2",
+  "python-multipart>=0.0.20",
+  "uvicorn[standard]>=0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28.1",
+  "mypy>=1.14.1",
+  "pytest>=8.3.4",
+  "pytest-cov>=6.0.0",
+  "ruff>=0.8.6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/multilingual_rag"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+  "B",
+  "UP",
+  "SIM",
+]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+packages = ["multilingual_rag"]
+
