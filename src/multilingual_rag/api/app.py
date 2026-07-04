@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from multilingual_rag import __version__
 from multilingual_rag.api.routes.health import router as health_router
+from multilingual_rag.api.routes.query import router as query_router
 from multilingual_rag.api.schemas import ErrorResponse
 from multilingual_rag.core.config import Settings, get_settings
 from multilingual_rag.core.errors import AppError
@@ -32,6 +33,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = app_settings
 
     app.include_router(health_router)
+    app.include_router(query_router)
     register_exception_handlers(app)
 
     return app
@@ -59,4 +61,3 @@ def register_exception_handlers(app: FastAPI) -> None:
 
 
 app = create_app()
-

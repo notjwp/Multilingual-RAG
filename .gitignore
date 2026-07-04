@@ -12,4 +12,5 @@ build/
 *.egg-info/
 logs/
 data/chroma/
+data/.tmp_chroma*/
 data/raw/

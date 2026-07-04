@@ -70,3 +70,51 @@ class IngestionResult(BaseModel):
     document: DocumentMetadata
     chunks: tuple[DocumentChunk, ...]
 
+
+class VectorSearchResult(BaseModel):
+    """A document chunk returned from vector search."""
+
+    model_config = ConfigDict(frozen=True)
+
+    chunk_id: str
+    document_id: str
+    text: str
+    language: str
+    source: str
+    chunk_index: int
+    score: float
+    page: int | None = None
+    token_count: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalContext(BaseModel):
+    """Retrieved context for one user query."""
+
+    model_config = ConfigDict(frozen=True)
+
+    query: str
+    query_language: str
+    results: tuple[VectorSearchResult, ...]
+
+
+class AnswerCitation(BaseModel):
+    """Citation for a generated answer."""
+
+    model_config = ConfigDict(frozen=True)
+
+    chunk_id: str
+    document_id: str
+    source: str
+    page: int | None = None
+    text: str
+
+
+class GeneratedAnswer(BaseModel):
+    """Generated answer and citations."""
+
+    model_config = ConfigDict(frozen=True)
+
+    answer: str
+    language: str
+    citations: tuple[AnswerCitation, ...]

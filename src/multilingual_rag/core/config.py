@@ -27,6 +27,7 @@ class Settings(BaseSettings):
 
     openai_api_key: SecretStr | None = None
     openai_embedding_model: str = "text-embedding-3-small"
+    openai_embedding_batch_size: int = Field(default=96, gt=0)
     openai_generation_model: str = "gpt-4.1-mini"
 
     chroma_persist_directory: Path = Path("data/chroma")

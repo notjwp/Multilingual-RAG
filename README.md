@@ -5,7 +5,7 @@ OpenAI, ChromaDB, and `langdetect`.
 
 ## Current Milestone
 
-Milestone 3 adds the ingestion pipeline:
+Milestone 7 adds the first end-to-end RAG query path:
 
 - Python package layout under `src/multilingual_rag`
 - Environment-driven settings
@@ -18,6 +18,14 @@ Milestone 3 adds the ingestion pipeline:
 - `langdetect` language detection
 - Deterministic overlapping text chunking
 - Document and chunk metadata models
+- Embedding provider protocol
+- OpenAI embedding client adapter
+- Batched document embeddings and single-query embeddings
+- Structured errors for missing API keys and provider failures
+- ChromaDB vector-store implementation
+- Retrieval service with metadata filters
+- OpenAI Responses-based answer generator
+- `POST /v1/query` endpoint with answer, citations, and retrieved chunks
 
 ## Planned Stack
 
@@ -58,3 +66,23 @@ Health endpoints:
 
 - `GET http://127.0.0.1:8000/healthz`
 - `GET http://127.0.0.1:8000/readyz`
+
+Query endpoint:
+
+- `POST http://127.0.0.1:8000/v1/query`
+
+Example body:
+
+```json
+{
+  "query": "What is this document about?",
+  "preferred_language": "en",
+  "top_k": 5,
+  "filters": {
+    "language": "en"
+  }
+}
+```
+
+The default query path requires documents to be embedded into ChromaDB first and requires
+`OPENAI_API_KEY` for OpenAI embeddings and answer generation.
