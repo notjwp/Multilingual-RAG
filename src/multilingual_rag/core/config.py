@@ -32,6 +32,15 @@ class Settings(BaseSettings):
 
     chroma_persist_directory: Path = Path("data/chroma")
     chroma_collection_name: str = "multilingual_documents"
+    raw_document_directory: Path = Path("data/raw")
+    document_store_path: Path = Path("data/document_store.json")
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/multilingual_rag"
+    jwt_secret_key: SecretStr = SecretStr("change-me-in-production")
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = Field(default=60, gt=0)
+    redis_url: str = "redis://localhost:6379/0"
+    celery_broker_url: str = "redis://localhost:6379/0"
+    celery_result_backend: str = "redis://localhost:6379/1"
 
     chunk_size_tokens: int = Field(default=800, gt=0)
     chunk_overlap_tokens: int = Field(default=120, ge=0)

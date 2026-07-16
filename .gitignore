@@ -13,4 +13,9 @@ build/
 logs/
 data/chroma/
 data/.tmp_chroma*/
+data/document_store.json
 data/raw/
+
+# Eval distractors are pure derivation: regenerate with scripts/build_eval_corpus.py
+# (pinned dataset revisions + SEED=42 make it byte-identical). Gold/queries ARE committed.
+data/eval/xquad/distractors_*.jsonl

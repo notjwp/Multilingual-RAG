@@ -1,0 +1,3 @@
+{"question":"What does the sample document explain?","expected_document_ids":["doc-rag"],"retrieved_document_ids":["doc-rag","doc-other"],"expected_language":"en","answer_language":"en"}
+{"question":"Que decrit le document ?","expected_document_ids":["doc-rag"],"retrieved_document_ids":["doc-other","doc-rag"],"expected_language":"fr","answer_language":"fr"}
+

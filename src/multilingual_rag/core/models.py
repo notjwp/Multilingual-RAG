@@ -118,3 +118,34 @@ class GeneratedAnswer(BaseModel):
     answer: str
     language: str
     citations: tuple[AnswerCitation, ...]
+
+
+class DocumentRecord(BaseModel):
+    """Persisted metadata for an indexed document."""
+
+    model_config = ConfigDict(frozen=True)
+
+    document: DocumentMetadata
+    chunk_count: int = Field(ge=0)
+
+
+class UserRecord(BaseModel):
+    """Authenticated user identity."""
+
+    model_config = ConfigDict(frozen=True)
+
+    user_id: str
+    email: str
+
+
+class IngestionJobRecord(BaseModel):
+    """Persisted ingestion job state."""
+
+    model_config = ConfigDict(frozen=True)
+
+    job_id: str
+    user_id: str
+    file_path: str
+    status: str
+    document_id: str | None = None
+    error_message: str | None = None

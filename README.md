@@ -5,7 +5,7 @@ OpenAI, ChromaDB, and `langdetect`.
 
 ## Current Milestone
 
-Milestone 7 adds the first end-to-end RAG query path:
+Milestone 10 completes the first production-ready local pipeline:
 
 - Python package layout under `src/multilingual_rag`
 - Environment-driven settings
@@ -26,6 +26,10 @@ Milestone 7 adds the first end-to-end RAG query path:
 - Retrieval service with metadata filters
 - OpenAI Responses-based answer generator
 - `POST /v1/query` endpoint with answer, citations, and retrieved chunks
+- Synchronous document upload, metadata lookup, and delete endpoints
+- File-backed document metadata store
+- Offline evaluation metrics and JSONL report CLI
+- Dockerfile, Docker Compose, and HTTP smoke test script
 
 ## Planned Stack
 
@@ -67,6 +71,12 @@ Health endpoints:
 - `GET http://127.0.0.1:8000/healthz`
 - `GET http://127.0.0.1:8000/readyz`
 
+Document endpoints:
+
+- `POST http://127.0.0.1:8000/v1/documents/upload`
+- `GET http://127.0.0.1:8000/v1/documents/{document_id}`
+- `DELETE http://127.0.0.1:8000/v1/documents/{document_id}`
+
 Query endpoint:
 
 - `POST http://127.0.0.1:8000/v1/query`
@@ -86,3 +96,21 @@ Example body:
 
 The default query path requires documents to be embedded into ChromaDB first and requires
 `OPENAI_API_KEY` for OpenAI embeddings and answer generation.
+
+## Evaluation
+
+```powershell
+python -m multilingual_rag.evaluation.run data/eval/sample_qa.jsonl --k 2
+```
+
+## Docker
+
+```powershell
+docker compose up --build
+```
+
+Run the smoke test against a running API:
+
+```powershell
+python scripts/smoke_test.py --base-url http://127.0.0.1:8000
+```
