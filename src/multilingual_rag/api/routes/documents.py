@@ -6,12 +6,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, cast
 
-from fastapi import APIRouter, Depends, Request, UploadFile
+from fastapi import APIRouter, Depends, Request, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from multilingual_rag.auth.dependencies import get_current_user
 from multilingual_rag.core.config import Settings
+from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import (
     DocumentMetadata,
     DocumentRecord,
@@ -79,7 +80,14 @@ async def upload_document(
 ) -> IngestionJobResponse:
     """Upload a document and enqueue asynchronous ingestion."""
     settings = cast(Settings, request.app.state.settings)
-    content = await file.read()
+    # Read at most one byte past the cap: nothing larger than the limit ever enters memory.
+    content = await file.read(settings.max_upload_bytes + 1)
+    if len(content) > settings.max_upload_bytes:
+        raise AppError(
+            "Uploaded document exceeds the size limit.",
+            code="upload_too_large",
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        )
     saved_path = save_upload_bytes(
         settings.raw_document_directory,
         filename=file.filename,

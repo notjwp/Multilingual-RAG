@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from typing import Any, Protocol, cast
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, Field
 
+from multilingual_rag.auth.dependencies import get_current_user
 from multilingual_rag.core.config import Settings
+from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import (
     AnswerCitation,
     GeneratedAnswer,
     RetrievalContext,
+    UserRecord,
     VectorSearchResult,
 )
 from multilingual_rag.embeddings.openai_embeddings import OpenAIEmbeddingProvider
@@ -22,6 +25,7 @@ from multilingual_rag.vectorstores.base import MetadataValue, VectorFilter
 from multilingual_rag.vectorstores.chroma_store import ChromaVectorStore
 
 router = APIRouter(prefix="/v1", tags=["query"])
+CURRENT_USER_DEPENDENCY = Depends(get_current_user)
 
 
 class QueryRequest(BaseModel):
@@ -71,8 +75,8 @@ class QueryResponse(BaseModel):
 class QueryService(Protocol):
     """Protocol for API query orchestration."""
 
-    def answer_query(self, request: QueryRequest) -> QueryResponse:
-        """Answer one query request."""
+    def answer_query(self, request: QueryRequest, *, user_id: str) -> QueryResponse:
+        """Answer one query request for a user."""
         ...
 
 
@@ -88,10 +92,17 @@ class RagQueryService:
         self.retrieval_service = retrieval_service
         self.answer_generator = answer_generator
 
-    def answer_query(self, request: QueryRequest) -> QueryResponse:
-        """Retrieve context and generate an answer for a query."""
+    def answer_query(self, request: QueryRequest, *, user_id: str) -> QueryResponse:
+        """Retrieve context and generate an answer for a user's query."""
+        if request.filters and "user_id" in request.filters:
+            raise AppError(
+                "user_id is not an allowed filter.",
+                code="reserved_filter_key",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
         context = self.retrieval_service.retrieve(
             request.query,
+            user_id=user_id,
             top_k=request.top_k,
             filters=cast(VectorFilter | None, request.filters),
         )
@@ -103,10 +114,14 @@ class RagQueryService:
 
 
 @router.post("/query", response_model=QueryResponse)
-async def query(request_body: QueryRequest, request: Request) -> QueryResponse:
+async def query(
+    request_body: QueryRequest,
+    request: Request,
+    current_user: UserRecord = CURRENT_USER_DEPENDENCY,
+) -> QueryResponse:
     """Answer a user query with retrieval-augmented generation."""
     query_service = get_query_service(request)
-    return query_service.answer_query(request_body)
+    return query_service.answer_query(request_body, user_id=current_user.user_id)
 
 
 def get_query_service(request: Request) -> QueryService:

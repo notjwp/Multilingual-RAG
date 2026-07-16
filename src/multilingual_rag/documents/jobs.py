@@ -30,7 +30,9 @@ async def run_ingestion_job(*, settings: Settings, session: AsyncSession, job_id
         embeddings = OpenAIEmbeddingProvider(settings).embed_documents(
             tuple(chunk.text for chunk in ingestion_result.chunks)
         )
-        ChromaVectorStore(settings).upsert_chunks(ingestion_result.chunks, embeddings)
+        ChromaVectorStore(settings).upsert_chunks(
+            ingestion_result.chunks, embeddings, user_id=job.user_id
+        )
 
         record = DocumentRecord(
             document=ingestion_result.document,

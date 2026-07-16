@@ -95,7 +95,12 @@ Example body:
 ```
 
 The default query path requires documents to be embedded into ChromaDB first and requires
-`OPENAI_API_KEY` for OpenAI embeddings and answer generation.
+`OPENAI_API_KEY` for OpenAI embeddings and answer generation. `/v1/query` requires a bearer
+token; each user only retrieves their own documents.
+
+> **Re-index required after upgrading past the tenancy fix.** Chunk vectors are now scoped by
+> `user_id`. Vectors written before this change carry no `user_id` and are therefore invisible
+> to queries (this fails closed by design). Wipe `data/chroma` and re-ingest documents.
 
 ## Evaluation
 

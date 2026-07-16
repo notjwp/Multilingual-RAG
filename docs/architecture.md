@@ -94,11 +94,19 @@ poll `GET /v1/ingestion-jobs/{job_id}`.
 | `DatabaseDocumentIndexingService` | PostgreSQL + Celery | per-`user_id` | **preferred** — what the routes use |
 | `DocumentIndexingService` + `DocumentStore` | JSON file (`data/document_store.json`) | none | legacy; still tested; slated for deletion |
 
-### 1.5 Identity
+### 1.5 Identity & tenancy
 
 JWT bearer via `auth/dependencies.py::get_current_user`. Password hashing is hand-rolled
 PBKDF2-HMAC-SHA256 in `auth/security.py` (format `pbkdf2_sha256$iterations$salt$digest`,
 310k iterations, `hmac.compare_digest`) — no passlib.
+
+**Tenancy (Phase A).** `/v1/query` requires authentication, and `user_id` is a required
+keyword-only argument on the `VectorStore` protocol (`upsert_chunks`/`search`/`delete_document`)
+— a forgotten call site is a mypy error, not a silent leak. `ChromaVectorStore` scopes search
+with `{"$and": [{"user_id": …}, <client filters>]}` (un-widenable), namespaces storage ids as
+`{user_id}:{chunk_id}` so identical cross-user uploads don't collide, and rejects a client
+`user_id` filter (`reserved_filter_key`). Content-addressed dedup that supersedes the
+namespacing is Phase D (D6).
 
 ### 1.6 Tech stack & data stores
 
@@ -308,8 +316,8 @@ the fix-in-place plan (Phases A–D); status is tracked in `docs/progress.md`.
 
 | # | Defect (current state) | Fix |
 |---|---|---|
-| Security | `POST /v1/query` is **unauthenticated**; Chroma metadata has no `user_id` → cross-tenant read of other users' chunks | A |
-| Security | `jwt_secret_key` defaults to `change-me-in-production` with no prod guard; uploads uncapped (`await file.read()`) | A |
+| ~~Security~~ ✅ | ~~`POST /v1/query` unauthenticated; Chroma has no `user_id`~~ — **fixed in Phase A**: query requires a bearer token, chunks carry `user_id`, search/delete are user-scoped, storage ids namespaced by user | A ✅ |
+| ~~Security~~ ✅ | ~~default prod secret; uncapped uploads~~ — **fixed in Phase A**: `Settings` refuses the placeholder secret in prod/staging; uploads capped at `max_upload_bytes` (413) | A ✅ |
 | Quality | `OpenAIAnswerGenerator` cites **every** retrieved chunk instead of parsing the model's `[n]` markers | B |
 | Quality | `evaluation/run.py` scores a static fixture; never exercises the real pipeline | B |
 | Multilingual | `chunker.py` tokenizes on `\S+` → collapses CJK/Thai to one chunk (M0: 96% of a Chinese doc dropped); `chunk_size_tokens=800` is in the wrong unit | C |

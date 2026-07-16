@@ -19,21 +19,24 @@ class VectorStore(Protocol):
         self,
         chunks: Sequence[DocumentChunk],
         embeddings: Sequence[EmbeddingVector],
+        *,
+        user_id: str,
     ) -> None:
-        """Insert or update chunk embeddings."""
+        """Insert or update chunk embeddings for one user."""
         ...
 
     def search(
         self,
         query_embedding: EmbeddingVector,
         *,
+        user_id: str,
         top_k: int,
         filters: VectorFilter | None = None,
     ) -> tuple[VectorSearchResult, ...]:
-        """Search the vector store for relevant chunks."""
+        """Search one user's chunks for relevant matches."""
         ...
 
-    def delete_document(self, document_id: str) -> None:
-        """Delete all chunks for a document."""
+    def delete_document(self, document_id: str, *, user_id: str) -> None:
+        """Delete all of one user's chunks for a document."""
         ...
 

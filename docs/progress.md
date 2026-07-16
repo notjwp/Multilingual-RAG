@@ -4,7 +4,7 @@ Working reference for where this project stands. Updated as work lands.
 
 **Last updated:** 2026-07-16
 **Current decision:** Fix-in-place (Phases A–D). Rebuild rejected on evidence.
-**Next action:** Phase A (security P0) — not yet started.
+**Next action:** Phase B (make it measurable). Phase A (security P0) ✅ complete.
 
 ---
 
@@ -16,7 +16,7 @@ Working reference for where this project stands. Updated as work lands.
 | M0 | Cross-lingual thesis spike | ✅ done — verdict: adopt **bge-m3** |
 | — | M0 close-out (pin/graduate/delete spike) | ✅ done |
 | — | Fix-vs-rebuild decision | ✅ **fix-in-place** |
-| A | Security (P0) | ⬜ not started |
+| A | Security (P0) | ✅ **done** — leak closed, 55 tests green |
 | B | Make it measurable | ⬜ not started |
 | C | Multilingual correctness + bge-m3 | ⬜ not started |
 | D | Async + infra | ⬜ not started |
@@ -66,13 +66,18 @@ Legend: ⬜ todo · 🟡 in progress · ✅ done
   `[untyped-decorator]`, which was also masking the real error)
 - Baseline now fully green: ruff ✅ · mypy ✅ (55 files) · pytest ✅ (51 passed)
 
-### Phase A — Security (P0, ~1 day)
-- ⬜ A1 auth on `/v1/query` (`api/routes/query.py`)
-- ⬜ A2 `user_id` in Chroma metadata + `search` signature; server-side `$and` scope
-- ⬜ A3 thread `user_id` retrieval → query service
-- ⬜ A4 refuse default `jwt_secret_key` in prod (`core/config.py`)
-- ⬜ A5 cap uploads (`Settings` + `save_upload_bytes`)
-- ⬜ tests: 401, cross-tenant isolation, rejected `user_id` filter
+### Phase A — Security (P0) ✅ DONE
+- ✅ A1 auth on `/v1/query` (`api/routes/query.py`)
+- ✅ A2 `user_id` in Chroma metadata + protocol `search`/`upsert`/`delete` signatures;
+  server-side `$and` scope; **storage ids namespaced by user** so identical cross-user uploads
+  don't overwrite (the non-obvious interaction — see plan)
+- ✅ A3 threaded `user_id` retrieval → query service; all 5 call sites fixed (mypy-enforced)
+- ✅ A4 refuse default `jwt_secret_key` in prod (`core/config.py`, `model_validator`) — verified
+- ✅ A5 cap uploads (`Settings.max_upload_bytes` + capped read → 413)
+- ✅ tests: 401, cross-tenant isolation (real Chroma), no-overwrite, scoped delete, rejected
+  `user_id` filter — **55 passed · ruff ✅ · mypy ✅**
+- ⚠️ Re-index required: pre-existing vectors lack `user_id` → invisible (fails closed). README
+  updated. No local `data/chroma` existed, so nothing to wipe here.
 
 ### Phase B — Measurable (~4 days)
 - ⬜ B1 parse real `[n]` citations (`openai_generator.py`)

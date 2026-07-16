@@ -34,8 +34,10 @@ class ChromaVectorStore:
         self,
         chunks: Sequence[DocumentChunk],
         embeddings: Sequence[EmbeddingVector],
+        *,
+        user_id: str,
     ) -> None:
-        """Insert or update chunk embeddings in ChromaDB."""
+        """Insert or update one user's chunk embeddings in ChromaDB."""
         if not chunks:
             raise AppError(
                 "At least one chunk is required for vector upsert.",
@@ -50,21 +52,24 @@ class ChromaVectorStore:
             )
 
         chroma_embeddings: list[ChromaEmbedding] = [embedding for embedding in embeddings]
+        # Storage ids are namespaced by user so two users uploading the byte-identical file
+        # (same checksum -> same document_id -> same chunk_id) do not overwrite each other.
         self._collection.upsert(
-            ids=[chunk.chunk_id for chunk in chunks],
+            ids=[storage_id(user_id, chunk.chunk_id) for chunk in chunks],
             documents=[chunk.text for chunk in chunks],
             embeddings=chroma_embeddings,
-            metadatas=[metadata_for_chunk(chunk) for chunk in chunks],
+            metadatas=[metadata_for_chunk(chunk, user_id) for chunk in chunks],
         )
 
     def search(
         self,
         query_embedding: EmbeddingVector,
         *,
+        user_id: str,
         top_k: int,
         filters: VectorFilter | None = None,
     ) -> tuple[VectorSearchResult, ...]:
-        """Search ChromaDB for chunks nearest to a query embedding."""
+        """Search one user's chunks in ChromaDB nearest to a query embedding."""
         if not query_embedding:
             raise AppError(
                 "Query embedding must not be empty.",
@@ -82,25 +87,47 @@ class ChromaVectorStore:
         query_result = self._collection.query(
             query_embeddings=query_embeddings,
             n_results=top_k,
-            where=dict(filters) if filters else None,
+            where=scoped_where(user_id, filters),
             include=["documents", "metadatas", "distances"],
         )
         return parse_query_result(cast(dict[str, Any], query_result))
 
-    def delete_document(self, document_id: str) -> None:
-        """Delete all chunks belonging to a document."""
+    def delete_document(self, document_id: str, *, user_id: str) -> None:
+        """Delete all of one user's chunks for a document."""
         if not document_id.strip():
             raise AppError(
                 "document_id is required.",
                 code="missing_document_id",
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
-        self._collection.delete(where={"document_id": document_id})
+        self._collection.delete(
+            where={"$and": [{"user_id": user_id}, {"document_id": document_id}]}
+        )
 
 
-def metadata_for_chunk(chunk: DocumentChunk) -> dict[str, MetadataValue]:
-    """Convert chunk metadata to Chroma-compatible scalar metadata."""
+def storage_id(user_id: str, chunk_id: str) -> str:
+    """Namespace a chunk's Chroma storage id by user (transparent to API results)."""
+    return f"{user_id}:{chunk_id}"
+
+
+def scoped_where(user_id: str, filters: VectorFilter | None) -> dict[str, Any]:
+    """Build a Chroma where clause pinned to one user, un-widenable by client filters.
+
+    Client conditions are AND-ed *under* the user scope, so a filter can only narrow a
+    user's own chunks, never reach another user's.
+    """
+    conditions: list[dict[str, Any]] = [{"user_id": user_id}]
+    if filters:
+        conditions.extend({key: value} for key, value in filters.items())
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
+
+
+def metadata_for_chunk(chunk: DocumentChunk, user_id: str) -> dict[str, MetadataValue]:
+    """Convert chunk metadata to Chroma-compatible scalar metadata, scoped to a user."""
     metadata: dict[str, MetadataValue] = {
+        "user_id": user_id,
         "chunk_id": chunk.chunk_id,
         "document_id": chunk.document_id,
         "language": chunk.language,

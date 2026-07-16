@@ -35,13 +35,13 @@ class DocumentIndexingService:
         self.vector_store = vector_store
         self.document_store = document_store
 
-    def index_file(self, path: Path) -> DocumentRecord:
+    def index_file(self, path: Path, *, user_id: str) -> DocumentRecord:
         """Index one local document file."""
         ingestion_result = self.ingestion_service.ingest_file(path)
         embeddings = self.embedding_provider.embed_documents(
             tuple(chunk.text for chunk in ingestion_result.chunks)
         )
-        self.vector_store.upsert_chunks(ingestion_result.chunks, embeddings)
+        self.vector_store.upsert_chunks(ingestion_result.chunks, embeddings, user_id=user_id)
 
         record = DocumentRecord(
             document=ingestion_result.document,
@@ -54,10 +54,10 @@ class DocumentIndexingService:
         """Return stored metadata for one indexed document."""
         return self.document_store.get(document_id)
 
-    def delete_document(self, document_id: str) -> DocumentRecord:
+    def delete_document(self, document_id: str, *, user_id: str) -> DocumentRecord:
         """Delete one indexed document from vector and metadata stores."""
         record = self.document_store.delete(document_id)
-        self.vector_store.delete_document(document_id)
+        self.vector_store.delete_document(document_id, user_id=user_id)
         return record
 
 
@@ -94,7 +94,7 @@ class DatabaseDocumentIndexingService:
     async def delete_document(self, *, user_id: str, document_id: str) -> DocumentRecord:
         """Delete one indexed document from metadata and vector stores."""
         record = await self.document_repository.delete(user_id=user_id, document_id=document_id)
-        self.vector_store.delete_document(document_id)
+        self.vector_store.delete_document(document_id, user_id=user_id)
         return record
 
 

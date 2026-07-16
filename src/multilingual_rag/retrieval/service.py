@@ -29,15 +29,17 @@ class RetrievalService:
         self,
         query: str,
         *,
+        user_id: str,
         top_k: int | None = None,
         filters: VectorFilter | None = None,
     ) -> RetrievalContext:
-        """Retrieve context chunks for a query."""
+        """Retrieve one user's context chunks for a query."""
         normalized_query = query.strip()
         query_language = self.language_detector.detect(normalized_query)
         query_embedding = self.embedding_provider.embed_query(normalized_query)
         results = self.vector_store.search(
             query_embedding,
+            user_id=user_id,
             top_k=top_k or self.settings.retrieval_top_k,
             filters=filters,
         )

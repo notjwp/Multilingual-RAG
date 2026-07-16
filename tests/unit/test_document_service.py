@@ -23,24 +23,27 @@ class FakeEmbeddingProvider:
 class FakeVectorStore:
     def __init__(self) -> None:
         self.upsert_count = 0
-        self.deleted_document_ids: list[str] = []
+        self.upsert_user_ids: list[str] = []
+        self.deleted: list[tuple[str, str]] = []
 
-    def upsert_chunks(self, chunks: object, embeddings: object) -> None:
+    def upsert_chunks(self, chunks: object, embeddings: object, *, user_id: str) -> None:
         del chunks, embeddings
         self.upsert_count += 1
+        self.upsert_user_ids.append(user_id)
 
     def search(
         self,
         query_embedding: EmbeddingVector,
         *,
+        user_id: str,
         top_k: int,
         filters: VectorFilter | None = None,
     ) -> tuple:
-        del query_embedding, top_k, filters
+        del query_embedding, user_id, top_k, filters
         return ()
 
-    def delete_document(self, document_id: str) -> None:
-        self.deleted_document_ids.append(document_id)
+    def delete_document(self, document_id: str, *, user_id: str) -> None:
+        self.deleted.append((document_id, user_id))
 
 
 def test_save_upload_bytes_sanitizes_and_persists_file(tmp_path: Path) -> None:
@@ -70,11 +73,12 @@ def test_document_indexing_service_indexes_and_deletes_text_file(tmp_path: Path)
         document_store=DocumentStore(tmp_path / "documents.json"),
     )
 
-    record = service.index_file(source_path)
+    record = service.index_file(source_path, user_id="user-1")
     fetched = service.get_document(record.document.document_id)
-    deleted = service.delete_document(record.document.document_id)
+    deleted = service.delete_document(record.document.document_id, user_id="user-1")
 
     assert fetched == record
     assert deleted == record
     assert vector_store.upsert_count == 1
-    assert vector_store.deleted_document_ids == [record.document.document_id]
+    assert vector_store.upsert_user_ids == ["user-1"]
+    assert vector_store.deleted == [(record.document.document_id, "user-1")]
