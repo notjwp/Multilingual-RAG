@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     api_prefix: str = "/v1"
 
+    # Embedding provider: bge-m3 (local, free) is the default; openai stays available.
+    embedding_provider: Literal["bge-m3", "openai"] = "bge-m3"
+    embedding_device: str | None = None  # bge-m3 torch device; None = auto-select CUDA
+
     openai_api_key: SecretStr | None = None
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_batch_size: int = Field(default=96, gt=0)

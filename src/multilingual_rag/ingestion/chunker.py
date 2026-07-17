@@ -1,4 +1,4 @@
-"""Deterministic text chunking utilities."""
+"""Deterministic text chunking over the embedding model's own tokens."""
 
 from __future__ import annotations
 
@@ -8,14 +8,23 @@ from collections.abc import Iterable
 from multilingual_rag.core.models import DocumentChunk, DocumentSection
 from multilingual_rag.ingestion.language import LanguageDetector
 from multilingual_rag.ingestion.service_utils import checksum_text
-
-TOKEN_PATTERN = re.compile(r"\S+")
+from multilingual_rag.ingestion.tokenizer import Tokenizer
 
 
 class TextChunker:
-    """Split document sections into overlapping token windows."""
+    """Split document sections into overlapping windows of real (sub-word) tokens.
 
-    def __init__(self, chunk_size_tokens: int, chunk_overlap_tokens: int) -> None:
+    Windowing over the embedding model's tokenizer — not whitespace — is what makes CJK/Thai
+    chunk correctly: those scripts have no inter-word spaces, so ``\\S+`` collapsed a whole
+    document into one oversized chunk.
+    """
+
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        chunk_size_tokens: int,
+        chunk_overlap_tokens: int,
+    ) -> None:
         if chunk_size_tokens <= 0:
             raise ValueError("chunk_size_tokens must be greater than zero")
         if chunk_overlap_tokens < 0:
@@ -23,6 +32,7 @@ class TextChunker:
         if chunk_overlap_tokens >= chunk_size_tokens:
             raise ValueError("chunk_overlap_tokens must be smaller than chunk_size_tokens")
 
+        self.tokenizer = tokenizer
         self.chunk_size_tokens = chunk_size_tokens
         self.chunk_overlap_tokens = chunk_overlap_tokens
 
@@ -45,14 +55,14 @@ class TextChunker:
                 continue
 
             section_language = language_detector.detect(normalized_text, default=default_language)
-            token_spans = list(iter_token_spans(normalized_text))
+            token_ids = self.tokenizer.encode(normalized_text)
 
-            for start in range(0, len(token_spans), self._step_size):
-                window = token_spans[start : start + self.chunk_size_tokens]
+            for start in range(0, len(token_ids), self._step_size):
+                window = token_ids[start : start + self.chunk_size_tokens]
                 if not window:
                     continue
 
-                chunk_text = normalized_text[window[0][0] : window[-1][1]].strip()
+                chunk_text = self.tokenizer.decode(window).strip()
                 if not chunk_text:
                     continue
 
@@ -75,7 +85,7 @@ class TextChunker:
                 )
                 chunk_index += 1
 
-                if start + self.chunk_size_tokens >= len(token_spans):
+                if start + self.chunk_size_tokens >= len(token_ids):
                     break
 
         return tuple(chunks)
@@ -88,10 +98,3 @@ class TextChunker:
 def normalize_text(text: str) -> str:
     """Normalize whitespace while preserving readable text boundaries."""
     return re.sub(r"\s+", " ", text).strip()
-
-
-def iter_token_spans(text: str) -> Iterable[tuple[int, int]]:
-    """Yield approximate token spans based on non-whitespace runs."""
-    for match in TOKEN_PATTERN.finditer(text):
-        yield match.span()
-

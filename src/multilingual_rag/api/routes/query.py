@@ -17,7 +17,7 @@ from multilingual_rag.core.models import (
     UserRecord,
     VectorSearchResult,
 )
-from multilingual_rag.embeddings.openai_embeddings import OpenAIEmbeddingProvider
+from multilingual_rag.embeddings.factory import build_embedding_provider
 from multilingual_rag.generation.base import AnswerGenerator
 from multilingual_rag.generation.openai_generator import OpenAIAnswerGenerator
 from multilingual_rag.retrieval.service import RetrievalService
@@ -131,7 +131,7 @@ def get_query_service(request: Request) -> QueryService:
         return cast(QueryService, existing_service)
 
     settings = cast(Settings, request.app.state.settings)
-    embedding_provider = OpenAIEmbeddingProvider(settings)
+    embedding_provider = build_embedding_provider(settings)
     vector_store = ChromaVectorStore(settings)
     retrieval_service = RetrievalService(
         settings,

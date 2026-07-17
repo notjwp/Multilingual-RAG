@@ -12,6 +12,7 @@ from multilingual_rag.ingestion.chunker import TextChunker, normalize_text
 from multilingual_rag.ingestion.language import LanguageDetector
 from multilingual_rag.ingestion.loaders import DocumentLoader
 from multilingual_rag.ingestion.service_utils import checksum_text
+from multilingual_rag.ingestion.tokenizer import BgeM3Tokenizer
 
 
 class IngestionService:
@@ -29,6 +30,7 @@ class IngestionService:
         self.loader = loader or DocumentLoader()
         self.language_detector = language_detector or LanguageDetector()
         self.chunker = chunker or TextChunker(
+            BgeM3Tokenizer(),
             chunk_size_tokens=settings.chunk_size_tokens,
             chunk_overlap_tokens=settings.chunk_overlap_tokens,
         )

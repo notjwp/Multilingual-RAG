@@ -4,7 +4,7 @@ Working reference for where this project stands. Updated as work lands.
 
 **Last updated:** 2026-07-16
 **Current decision:** Fix-in-place (Phases A–D). Rebuild rejected on evidence.
-**Next action:** Phase C (multilingual correctness + bge-m3 production swap). Phases A + B ✅ complete.
+**Next action:** Phase C4 (free OpenRouter generation). Phases A + B ✅, Phase C (C1–C3) code complete.
 
 ---
 
@@ -18,7 +18,8 @@ Working reference for where this project stands. Updated as work lands.
 | — | Fix-vs-rebuild decision | ✅ **fix-in-place** |
 | A | Security (P0) | ✅ **done** — leak closed, 55 tests green |
 | B | Make it measurable | ✅ **done** — real citations + free live retrieval eval |
-| C | Multilingual correctness + bge-m3 | ⬜ not started |
+| C | Multilingual correctness (C1–C3) | ✅ **done** — CJK chunking fixed, bge-m3 in prod, no regression (0.902) |
+| C4 | Free generation (OpenRouter) | ⬜ next |
 | D | Async + infra | ⬜ not started |
 
 ---
@@ -110,12 +111,35 @@ search. The real pipeline reproduces the spike's retrieval quality. `language_ma
 is expected (no generation until C). Note: combined vs per-language, so not perfectly
 apples-to-apples; an en-only/zh-only run would isolate it if ever needed.
 
-### Phase C — Multilingual + bge-m3 (~3 days)
-- ⬜ C1 tokenizer-aware chunking (tokenizer as `EmbeddingProvider` dependency)
-- ⬜ C2 fix `"unknown"`-language-into-prompt (`language.py` / generator)
-- ⬜ C3 `BgeM3EmbeddingProvider` — **must not load per request** (couples with D3)
-- ⬜ C4 generation → free-tier API (OpenRouter Qwen2.5-72B)
-- ⬜ re-index Chroma (covers both `user_id` and 1024-dim change)
+### Phase C — Multilingual correctness (C1–C3) ✅ code complete, offline
+Scoped to C1–C3 (fully offline, no signup/spend); C4 (generation) is its own next phase.
+- ✅ C1 tokenizer-aware chunking: `Tokenizer` protocol + `BgeM3Tokenizer`
+  (`ingestion/tokenizer.py`, loads only the tokenizer, not the 2.2 GB model); `TextChunker`
+  windows over token ids. **Proven end-to-end:** a long Chinese doc that `\S+` collapsed to 1
+  blob now yields **9 correctly-sized chunks** through the real `IngestionService`.
+- ✅ C2 `resolve_answer_language` (`generation/language.py`) wired into the generator — a short
+  query that detects as `"unknown"` now answers in the evidence's language, never "unknown".
+- ✅ C3 `build_embedding_provider` factory (`embeddings/factory.py`); `embedding_provider` /
+  `embedding_device` settings; wired into query route + ingestion job; `sentence-transformers`
+  moved to **core** deps (torch in the image — Phase D slims it). Per-request safe via the
+  model's `@lru_cache`.
+- ✅ 73 passed + 2 skipped (model tests opt-in), ruff + mypy clean.
+- ✅ No-regression eval passed: recall@5 = **0.9021** (Phase B was 0.9034 — identical within
+  HNSW noise). Confirms the production bge-m3 embedding path works after the 1024-dim re-index.
+
+**Findings to carry into C4:**
+- langdetect returns BCP-47-ish codes (`zh-cn`/`zh-tw`), **not** ISO `zh`. The M0 eval corpus
+  labels languages as `zh`/`en`/`es`/`th`, so `language_match_rate` will read 0 even when the
+  answer language is correct unless codes are normalized. Normalize (e.g. `zh-cn` → `zh`) when
+  wiring generation eval in C4.
+
+### Phase C4 — Free generation (next)
+- ⬜ OpenRouter/Qwen2.5-72B generator (OpenAI-compatible `chat.completions`; reuse
+  `parse_cited_results` + `resolve_answer_language`) — needs a free OpenRouter key (one signup)
+- ⬜ `OpenRouterFaithfulnessJudge` impl for the B `FaithfulnessJudge` port
+- ⬜ extend harness to run generation → citation precision/recall, faithfulness, language match
+  (closes Phase B's deferral); normalize language codes (see finding above)
+- ⬜ re-index Chroma (1024-dim) — already done during C verification
 
 ### Phase D — Async + infra (~1 week)
 - ⬜ D1 async core (ports + services + adapters)

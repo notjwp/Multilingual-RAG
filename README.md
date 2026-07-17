@@ -98,9 +98,11 @@ The default query path requires documents to be embedded into ChromaDB first and
 `OPENAI_API_KEY` for OpenAI embeddings and answer generation. `/v1/query` requires a bearer
 token; each user only retrieves their own documents.
 
-> **Re-index required after upgrading past the tenancy fix.** Chunk vectors are now scoped by
-> `user_id`. Vectors written before this change carry no `user_id` and are therefore invisible
-> to queries (this fails closed by design). Wipe `data/chroma` and re-ingest documents.
+> **Re-index required after upgrading.** Two changes invalidate old vectors: (1) chunk vectors
+> are now scoped by `user_id` (vectors written before this carry none and fail closed), and
+> (2) the default embedding model is now **bge-m3 (1024-dim)** instead of OpenAI (1536-dim) —
+> Chroma rejects a dimension change on an existing collection. Wipe `data/chroma` and re-ingest.
+> Set `EMBEDDING_PROVIDER=openai` to keep the previous embeddings.
 
 ## Evaluation
 
@@ -111,10 +113,9 @@ python -m multilingual_rag.evaluation.run data/eval/sample_qa.jsonl --k 2
 ```
 
 Live mode runs the real retrieval pipeline (local bge-m3 embeddings + Chroma) over the XQuAD
-corpus in `data/eval/xquad/` — free, no API calls. Requires the `eval` extra:
+corpus in `data/eval/xquad/` — free, no API calls (`sentence-transformers` is a core dependency):
 
 ```powershell
-python -m pip install -e ".[eval]"
 python -m multilingual_rag.evaluation.run --live --langs en zh --k 5
 # --sample N caps distractors/queries per language for a fast smoke run (inflates recall)
 ```

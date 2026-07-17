@@ -6,6 +6,7 @@ from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import RetrievalContext, VectorSearchResult
 from multilingual_rag.generation.citations import parse_cited_results
+from multilingual_rag.generation.language import resolve_answer_language
 from multilingual_rag.generation.openai_generator import OpenAIAnswerGenerator
 from multilingual_rag.generation.prompts import build_answer_prompt
 
@@ -145,4 +146,48 @@ def test_generator_cites_only_marked_chunks_not_all() -> None:
     answer = generator.generate_answer(context=context)
 
     assert [c.chunk_id for c in answer.citations] == ["b"]
+
+
+def _zh_results() -> tuple[VectorSearchResult, ...]:
+    return (
+        VectorSearchResult(
+            chunk_id="c1",
+            document_id="d1",
+            text="内容",
+            language="zh-cn",
+            source="s",
+            chunk_index=0,
+            score=0.9,
+            token_count=2,
+        ),
+    )
+
+
+def test_resolve_language_prefers_explicit_preference() -> None:
+    assert resolve_answer_language("fr", "en", ()) == "fr"
+
+
+def test_resolve_language_uses_known_query_language() -> None:
+    assert resolve_answer_language(None, "de", ()) == "de"
+
+
+def test_resolve_language_falls_back_to_evidence_when_query_unknown() -> None:
+    # Short query -> "unknown"; answer should follow the retrieved documents, not say "unknown".
+    assert resolve_answer_language(None, "unknown", _zh_results()) == "zh-cn"
+
+
+def test_resolve_language_defaults_to_en_when_nothing_known() -> None:
+    assert resolve_answer_language(None, "unknown", ()) == "en"
+
+
+def test_generator_never_answers_in_unknown() -> None:
+    context = RetrievalContext(query="GDPR?", query_language="unknown", results=_zh_results())
+    generator = OpenAIAnswerGenerator(
+        Settings(openai_api_key=SecretStr("test-key")),
+        client=FakeResponsesClient(output_text="内容 [1]"),
+    )
+
+    answer = generator.generate_answer(context=context)
+
+    assert answer.language == "zh-cn"  # resolved from evidence, never "unknown"
 

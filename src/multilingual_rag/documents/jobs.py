@@ -10,7 +10,7 @@ from multilingual_rag.core.config import Settings
 from multilingual_rag.core.models import DocumentRecord
 from multilingual_rag.db.models import IngestionJob
 from multilingual_rag.documents.repository import DocumentRepository, IngestionJobRepository
-from multilingual_rag.embeddings.openai_embeddings import OpenAIEmbeddingProvider
+from multilingual_rag.embeddings.factory import build_embedding_provider
 from multilingual_rag.ingestion.service import IngestionService
 from multilingual_rag.vectorstores.chroma_store import ChromaVectorStore
 
@@ -27,7 +27,7 @@ async def run_ingestion_job(*, settings: Settings, session: AsyncSession, job_id
 
     try:
         ingestion_result = IngestionService(settings).ingest_file(Path(job.file_path))
-        embeddings = OpenAIEmbeddingProvider(settings).embed_documents(
+        embeddings = build_embedding_provider(settings).embed_documents(
             tuple(chunk.text for chunk in ingestion_result.chunks)
         )
         ChromaVectorStore(settings).upsert_chunks(

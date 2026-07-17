@@ -24,18 +24,22 @@ EMBEDDING_DIM = 1024
 
 
 @lru_cache(maxsize=1)
-def _load_model() -> SentenceTransformer:
-    """Load the ~2.2 GB model once per process (never per call)."""
+def _load_model(device: str | None) -> SentenceTransformer:
+    """Load the ~2.2 GB model once per (process, device) — never per call."""
     from sentence_transformers import SentenceTransformer
 
-    return cast("SentenceTransformer", SentenceTransformer(MODEL_NAME, revision=MODEL_REVISION))
+    return cast(
+        "SentenceTransformer",
+        SentenceTransformer(MODEL_NAME, revision=MODEL_REVISION, device=device),
+    )
 
 
 class BgeM3EmbeddingProvider:
     """Embed text with bge-m3. Satisfies the ``EmbeddingProvider`` protocol."""
 
-    def __init__(self, *, batch_size: int = 16) -> None:
+    def __init__(self, *, batch_size: int = 16, device: str | None = None) -> None:
         self.batch_size = batch_size
+        self.device = device
 
     def embed_documents(self, texts: Sequence[str]) -> list[EmbeddingVector]:
         """Embed document texts. bge-m3 takes raw text — no ``passage:`` prefix."""
@@ -50,7 +54,7 @@ class BgeM3EmbeddingProvider:
             return []
         vectors = cast(
             Any,
-            _load_model().encode(
+            _load_model(self.device).encode(
                 texts,
                 batch_size=self.batch_size,
                 normalize_embeddings=True,

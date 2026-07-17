@@ -318,11 +318,11 @@ the fix-in-place plan (Phases A–D); status is tracked in `docs/progress.md`.
 |---|---|---|
 | ~~Security~~ ✅ | ~~`POST /v1/query` unauthenticated; Chroma has no `user_id`~~ — **fixed in Phase A**: query requires a bearer token, chunks carry `user_id`, search/delete are user-scoped, storage ids namespaced by user | A ✅ |
 | ~~Security~~ ✅ | ~~default prod secret; uncapped uploads~~ — **fixed in Phase A**: `Settings` refuses the placeholder secret in prod/staging; uploads capped at `max_upload_bytes` (413) | A ✅ |
-| Quality | `OpenAIAnswerGenerator` cites **every** retrieved chunk instead of parsing the model's `[n]` markers | B |
-| Quality | `evaluation/run.py` scores a static fixture; never exercises the real pipeline | B |
-| Multilingual | `chunker.py` tokenizes on `\S+` → collapses CJK/Thai to one chunk (M0: 96% of a Chinese doc dropped); `chunk_size_tokens=800` is in the wrong unit | C |
-| Multilingual | `LanguageDetector` returns `"unknown"` under 20 chars → prompt tells the model to answer in "unknown" | C |
-| Model | Still on OpenAI embeddings; M0 selected bge-m3 (1024-dim, no prefixes, 8192 context) | C |
+| ~~Quality~~ ✅ | ~~cites every retrieved chunk~~ — **fixed in B**: `generation/citations.py` parses the model's `[n]` markers, cites only those | B ✅ |
+| ~~Quality~~ ✅ | ~~`evaluation/run.py` scores a static fixture~~ — **fixed in B**: `--live` runs the real pipeline (bge-m3 + Chroma) over the XQuAD corpus | B ✅ |
+| ~~Multilingual~~ ✅ | ~~`\S+` collapses CJK/Thai to one chunk~~ — **fixed in C1**: `TextChunker` windows over bge-m3 token ids (`ingestion/tokenizer.py`); a long Chinese doc now yields many chunks | C ✅ |
+| ~~Multilingual~~ ✅ | ~~`"unknown"` language leaks into the prompt~~ — **fixed in C2**: `resolve_answer_language` falls back to evidence language, then `en` | C ✅ |
+| ~~Model~~ ✅ | ~~still on OpenAI embeddings~~ — **fixed in C3**: bge-m3 (1024-dim, no prefixes) is the default via `embeddings/factory.py`; OpenAI stays available behind config | C ✅ |
 | Runtime | Sync core blocks the event loop; clients built per-request in `get_query_service` | D |
 | Runtime | Embedded Chroma shared by api + worker processes (SQLite writer contention) | D |
 | Data | `DELETE /v1/documents/{id}` bulk-deletes bypassing ORM cascade; no FK `ondelete` → IntegrityError on real Postgres | D |

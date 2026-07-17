@@ -11,6 +11,7 @@ from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import AnswerCitation, GeneratedAnswer, RetrievalContext
 from multilingual_rag.generation.citations import parse_cited_results
+from multilingual_rag.generation.language import resolve_answer_language
 from multilingual_rag.generation.prompts import SYSTEM_INSTRUCTIONS, build_answer_prompt
 
 
@@ -70,7 +71,9 @@ class OpenAIAnswerGenerator:
         preferred_language: str | None = None,
     ) -> GeneratedAnswer:
         """Generate a grounded answer from retrieved context."""
-        response_language = preferred_language or context.query_language
+        response_language = resolve_answer_language(
+            preferred_language, context.query_language, context.results
+        )
         prompt = build_answer_prompt(context, response_language=response_language)
 
         try:
