@@ -10,6 +10,7 @@ from openai import OpenAI, OpenAIError
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import AnswerCitation, GeneratedAnswer, RetrievalContext
+from multilingual_rag.generation.citations import parse_cited_results
 from multilingual_rag.generation.prompts import SYSTEM_INSTRUCTIONS, build_answer_prompt
 
 
@@ -104,7 +105,7 @@ class OpenAIAnswerGenerator:
                     page=result.page,
                     text=result.text,
                 )
-                for result in context.results
+                for result in parse_cited_results(answer, context.results)
             ),
         )
 

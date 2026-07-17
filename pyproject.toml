@@ -42,6 +42,11 @@ dev = [
   "pytest-cov>=6.0.0",
   "ruff>=0.8.6",
 ]
+# Local, free embedding for offline evaluation (bge-m3). Kept out of the core deps so the
+# deployable image stays torch-free until the production embedding swap (Phase C).
+eval = [
+  "sentence-transformers>=3.0.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/multilingual_rag"]

@@ -104,9 +104,23 @@ token; each user only retrieves their own documents.
 
 ## Evaluation
 
+Fixture mode scores a precomputed JSONL dataset:
+
 ```powershell
 python -m multilingual_rag.evaluation.run data/eval/sample_qa.jsonl --k 2
 ```
+
+Live mode runs the real retrieval pipeline (local bge-m3 embeddings + Chroma) over the XQuAD
+corpus in `data/eval/xquad/` — free, no API calls. Requires the `eval` extra:
+
+```powershell
+python -m pip install -e ".[eval]"
+python -m multilingual_rag.evaluation.run --live --langs en zh --k 5
+# --sample N caps distractors/queries per language for a fast smoke run (inflates recall)
+```
+
+Generation-side metrics (citation precision, faithfulness, answer language) arrive with the
+free generation adapter in a later milestone; live mode currently measures retrieval only.
 
 ## Docker
 

@@ -4,7 +4,7 @@ Working reference for where this project stands. Updated as work lands.
 
 **Last updated:** 2026-07-16
 **Current decision:** Fix-in-place (Phases A–D). Rebuild rejected on evidence.
-**Next action:** Phase B (make it measurable). Phase A (security P0) ✅ complete.
+**Next action:** Phase C (multilingual correctness + bge-m3 production swap). Phases A + B ✅ complete.
 
 ---
 
@@ -17,7 +17,7 @@ Working reference for where this project stands. Updated as work lands.
 | — | M0 close-out (pin/graduate/delete spike) | ✅ done |
 | — | Fix-vs-rebuild decision | ✅ **fix-in-place** |
 | A | Security (P0) | ✅ **done** — leak closed, 55 tests green |
-| B | Make it measurable | ⬜ not started |
+| B | Make it measurable | ✅ **done** — real citations + free live retrieval eval |
 | C | Multilingual correctness + bge-m3 | ⬜ not started |
 | D | Async + infra | ⬜ not started |
 
@@ -79,11 +79,36 @@ Legend: ⬜ todo · 🟡 in progress · ✅ done
 - ⚠️ Re-index required: pre-existing vectors lack `user_id` → invisible (fails closed). README
   updated. No local `data/chroma` existed, so nothing to wipe here.
 
-### Phase B — Measurable (~4 days)
-- ⬜ B1 parse real `[n]` citations (`openai_generator.py`)
-- ⬜ B2 real eval harness through the live pipeline (`evaluation/harness.py`)
-- ⬜ B3 citation precision/recall + faithfulness (`FaithfulnessJudge` port)
-- ⬜ B4/B5 dataset schema + `--live` flag; leave legacy fixture alone
+### Phase B — Measurable ✅ DONE (zero-spend)
+Reshaped by the "never spend on OpenAI" constraint: retrieval eval runs **free** on local
+bge-m3; generation-side metric *values* deferred to C (need a free LLM).
+- ✅ B1 real `[n]` citation parsing (`generation/citations.py`) — generator cites only marked
+  chunks, never everything; `parse_cited_results` reused by the free generator in C
+- ✅ B2 `citation_precision`/`citation_recall` (`metrics.py`); `FaithfulnessJudge` Protocol +
+  `average_faithfulness` (`evaluation/faithfulness.py`) — impl in C
+- ✅ B3 `BgeM3EmbeddingProvider` (`embeddings/bge_embeddings.py`), no prefixes, pinned revision,
+  `lru_cache` load; `sentence-transformers` under optional `[eval]` extra (core stays torch-free)
+- ✅ B4 live harness (`evaluation/harness.py`) — maps XQuAD to one-chunk docs, ingests +
+  retrieves under `user_id="__eval__"` in an isolated Chroma; provider-agnostic (fake-tested)
+- ✅ B5 `load_xquad_corpus` (`datasets.py`, fixture mode untouched); `run.py --live/--langs/--sample`
+- ✅ 64 passed + 1 skipped (bge-m3 test opt-in via `RUN_MODEL_TESTS=1`); ruff + mypy clean
+- **Deferred to C:** real generation numbers (citation precision/faithfulness values, answer
+  language), production embedding swap + Chroma re-index, free generation adapter
+- Decision noted: `citation_precision` is 1.0 when nothing is cited (vacuous) — always paired
+  with recall (0.0 there), so a non-citing answer is still penalised
+
+**Free live retrieval baseline** (the deliverable): `python -m multilingual_rag.evaluation.run
+--live --langs en zh --k 5` (needs `pip install -e ".[eval]"`).
+
+Recorded baseline (en+zh, 40,480 docs, 2,380 queries, $0):
+**recall@5 = 0.903 · MRR = 0.815 · nDCG@5 = 0.837.**
+
+Wiring confirmed vs M0 (bge-m3 monolingual, exact search: en 0.920 / zh 0.930, avg ~0.925). The
+0.903 is close-but-lower as predicted — explained by (1) a single mixed en+zh index = 40k
+distractors/query vs M0's per-language 20k, and (2) Chroma HNSW (approximate) vs M0's exact
+search. The real pipeline reproduces the spike's retrieval quality. `language_match_rate=0.0`
+is expected (no generation until C). Note: combined vs per-language, so not perfectly
+apples-to-apples; an en-only/zh-only run would isolate it if ever needed.
 
 ### Phase C — Multilingual + bge-m3 (~3 days)
 - ⬜ C1 tokenizer-aware chunking (tokenizer as `EmbeddingProvider` dependency)

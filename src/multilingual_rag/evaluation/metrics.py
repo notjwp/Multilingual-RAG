@@ -62,3 +62,19 @@ def language_match_rate(
     if not pairs:
         return 0.0
     return sum(1 for expected, actual in pairs if expected == actual) / len(pairs)
+
+
+def citation_precision(cited_ids: Sequence[str], relevant_ids: Sequence[str]) -> float:
+    """Fraction of cited sources that are relevant. 1.0 when nothing is cited (vacuously exact)."""
+    cited = set(cited_ids)
+    if not cited:
+        return 1.0
+    return len(cited & set(relevant_ids)) / len(cited)
+
+
+def citation_recall(cited_ids: Sequence[str], relevant_ids: Sequence[str]) -> float:
+    """Fraction of relevant sources that were cited. 0.0 when there is nothing relevant to cite."""
+    relevant = set(relevant_ids)
+    if not relevant:
+        return 0.0
+    return len(set(cited_ids) & relevant) / len(relevant)

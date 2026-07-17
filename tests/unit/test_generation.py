@@ -5,6 +5,7 @@ from pydantic import SecretStr
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import RetrievalContext, VectorSearchResult
+from multilingual_rag.generation.citations import parse_cited_results
 from multilingual_rag.generation.openai_generator import OpenAIAnswerGenerator
 from multilingual_rag.generation.prompts import build_answer_prompt
 
@@ -93,4 +94,55 @@ def test_openai_generation_errors_are_wrapped() -> None:
 
     with pytest.raises(AppError, match="answer generation failed"):
         generator.generate_answer(context=make_context())
+
+
+def _results(*chunk_ids: str) -> tuple[VectorSearchResult, ...]:
+    return tuple(
+        VectorSearchResult(
+            chunk_id=chunk_id,
+            document_id=f"doc-{chunk_id}",
+            text=f"text {chunk_id}",
+            language="en",
+            source="sample.txt",
+            chunk_index=index,
+            score=0.9,
+            token_count=2,
+        )
+        for index, chunk_id in enumerate(chunk_ids)
+    )
+
+
+def test_parse_cited_results_maps_markers_in_order() -> None:
+    results = _results("a", "b", "c")
+    cited = parse_cited_results("Uses [2] then [1].", results)
+    assert [r.chunk_id for r in cited] == ["b", "a"]
+
+
+def test_parse_cited_results_ignores_out_of_range_markers() -> None:
+    results = _results("a", "b")
+    cited = parse_cited_results("Claim [9] and [0] and [2].", results)
+    assert [r.chunk_id for r in cited] == ["b"]  # [9]/[0] out of range, [2] -> results[1]
+
+
+def test_parse_cited_results_dedupes_preserving_first_seen() -> None:
+    results = _results("a", "b")
+    cited = parse_cited_results("[1] [2] [1] [2]", results)
+    assert [r.chunk_id for r in cited] == ["a", "b"]
+
+
+def test_parse_cited_results_cites_nothing_without_markers() -> None:
+    assert parse_cited_results("A plain answer with no brackets.", _results("a", "b")) == ()
+
+
+def test_generator_cites_only_marked_chunks_not_all() -> None:
+    # Three chunks retrieved, answer cites only [2]; the other two must NOT be cited.
+    context = RetrievalContext(query="q", query_language="en", results=_results("a", "b", "c"))
+    generator = OpenAIAnswerGenerator(
+        Settings(openai_api_key=SecretStr("test-key")),
+        client=FakeResponsesClient(output_text="Grounded claim [2]."),
+    )
+
+    answer = generator.generate_answer(context=context)
+
+    assert [c.chunk_id for c in answer.citations] == ["b"]
 
