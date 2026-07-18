@@ -31,10 +31,20 @@ class Settings(BaseSettings):
     embedding_provider: Literal["bge-m3", "openai"] = "bge-m3"
     embedding_device: str | None = None  # bge-m3 torch device; None = auto-select CUDA
 
+    # Generation: any OpenAI-compatible chat-completions endpoint. The provider is a URL, not a
+    # code path — NVIDIA NIM (default), OpenRouter, Groq, a local Ollama/vLLM shim, or OpenAI
+    # itself are all reachable by changing generation_base_url alone.
+    generation_base_url: str = "https://integrate.api.nvidia.com/v1"
+    generation_api_key: SecretStr | None = None
+    # Catalogs rotate — verify the id at your provider (e.g. build.nvidia.com/models).
+    generation_model: str = "meta/llama-3.1-8b-instruct"
+    # Fail fast instead of blocking on a cold/overloaded model (SDK default is 600s).
+    generation_timeout_seconds: float = Field(default=60.0, gt=0)
+
+    # Only used when embedding_provider is "openai".
     openai_api_key: SecretStr | None = None
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_batch_size: int = Field(default=96, gt=0)
-    openai_generation_model: str = "gpt-4.1-mini"
 
     chroma_persist_directory: Path = Path("data/chroma")
     chroma_collection_name: str = "multilingual_documents"
@@ -93,6 +103,23 @@ class Settings(BaseSettings):
             raise ValueError(
                 "jwt_secret_key must be set to a non-default value in "
                 f"{self.environment}; refusing to start with the placeholder secret."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def require_generation_credentials_in_prod(self) -> Self:
+        """Refuse to boot deployed environments without a generation API key.
+
+        Only enforced for production/staging: local and test construct Settings without keys,
+        and the generator raises a clear AppError naming the missing variable if it is ever
+        actually used.
+        """
+        if self.environment not in ("production", "staging"):
+            return self
+        if self.generation_api_key is None:
+            raise ValueError(
+                "generation_api_key is required; set GENERATION_API_KEY in "
+                f"{self.environment} (see GENERATION_BASE_URL for the provider)."
             )
         return self
 

@@ -17,13 +17,20 @@ from pydantic import BaseModel, Field
 
 
 class EvaluationExample(BaseModel):
-    """One offline evaluation example (fixture mode, or a scored live query)."""
+    """One offline evaluation example (fixture mode, or a scored live query).
+
+    Generation-side fields stay unset when no answer was generated (retrieval-only runs, or
+    queries outside a generation sample) — that absence is what marks an example as
+    retrieval-only when scoring.
+    """
 
     question: str = Field(min_length=1)
     expected_document_ids: tuple[str, ...] = Field(default_factory=tuple)
     retrieved_document_ids: tuple[str, ...] = Field(default_factory=tuple)
     expected_language: str | None = None
     answer_language: str | None = None
+    cited_document_ids: tuple[str, ...] = Field(default_factory=tuple)
+    faithful: bool | None = None
 
 
 @dataclass(frozen=True)

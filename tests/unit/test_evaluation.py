@@ -13,6 +13,7 @@ from multilingual_rag.evaluation.metrics import (
     reciprocal_rank,
 )
 from multilingual_rag.evaluation.run import build_report
+from multilingual_rag.generation.language import normalize_language_code
 
 
 def test_retrieval_metrics() -> None:
@@ -31,6 +32,20 @@ def test_retrieval_metrics_reject_invalid_k() -> None:
 
 def test_language_match_rate() -> None:
     assert language_match_rate(("en", "fr", None), ("en", "en", "es")) == 0.5
+
+
+def test_normalize_language_code_strips_region_subtag() -> None:
+    assert normalize_language_code("zh-cn") == "zh"
+    assert normalize_language_code("zh-TW") == "zh"
+    assert normalize_language_code("zh") == "zh"
+    assert normalize_language_code("EN") == "en"
+    assert normalize_language_code(None) is None
+
+
+def test_language_match_rate_matches_regional_variants() -> None:
+    # The latent bug: langdetect says "zh-cn", the corpus says "zh". A correct answer must
+    # not be scored as a mismatch.
+    assert language_match_rate(("zh", "hi"), ("zh-cn", "hi")) == 1.0
 
 
 def test_citation_precision_and_recall() -> None:

@@ -17,6 +17,18 @@ UNKNOWN_LANGUAGE = "unknown"
 DEFAULT_LANGUAGE = "en"
 
 
+def normalize_language_code(language: str | None) -> str | None:
+    """Reduce a language tag to its base subtag (``zh-cn`` -> ``zh``), lowercased.
+
+    langdetect emits BCP-47-ish tags (``zh-cn``, ``zh-tw``) while corpora label languages with
+    bare ISO codes (``zh``). Comparing the two raw makes a *correct* answer look wrong, so both
+    sides are normalized before any language comparison.
+    """
+    if language is None:
+        return None
+    return language.strip().lower().split("-")[0] or None
+
+
 def resolve_answer_language(
     preferred_language: str | None,
     query_language: str,

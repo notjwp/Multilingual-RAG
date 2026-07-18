@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 
+from multilingual_rag.generation.language import normalize_language_code
+
 
 def recall_at_k(expected_ids: Sequence[str], retrieved_ids: Sequence[str], *, k: int) -> float:
     """Return recall@k for expected and retrieved document IDs."""
@@ -53,9 +55,13 @@ def language_match_rate(
     expected_languages: Sequence[str | None],
     answer_languages: Sequence[str | None],
 ) -> float:
-    """Return the share of examples where answer language matches the expected language."""
+    """Return the share of examples where answer language matches the expected language.
+
+    Both sides are normalized (``zh-cn`` -> ``zh``) so a correct answer isn't scored wrong just
+    because langdetect emits a region subtag the corpus doesn't use.
+    """
     pairs = [
-        (expected, actual)
+        (normalize_language_code(expected), normalize_language_code(actual))
         for expected, actual in zip(expected_languages, answer_languages, strict=True)
         if expected is not None
     ]

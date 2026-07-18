@@ -21,7 +21,10 @@ from multilingual_rag.evaluation.datasets import (
     EvalDocument,
     EvaluationExample,
 )
+from multilingual_rag.evaluation.faithfulness import FaithfulnessJudge
+from multilingual_rag.generation.base import AnswerGenerator
 from multilingual_rag.ingestion.service_utils import checksum_text
+from multilingual_rag.retrieval.context import format_context
 from multilingual_rag.retrieval.service import RetrievalService
 from multilingual_rag.vectorstores.base import VectorStore
 
@@ -69,11 +72,18 @@ def run_live_evaluation(
     corpus: EvalCorpus,
     top_k: int,
     user_id: str = EVAL_USER_ID,
+    answer_generator: AnswerGenerator | None = None,
+    judge: FaithfulnessJudge | None = None,
+    generate_limit: int | None = None,
 ) -> tuple[EvaluationExample, ...]:
     """Index the corpus, run every query through real retrieval, return scored examples.
 
     Emits ``EvaluationExample`` so the same ``build_report`` scores live and fixture runs.
-    ``answer_language`` is left unset — generation is Phase C.
+
+    Retrieval always runs over the full corpus (local and free). Generation is optional and
+    **sampled** via ``generate_limit`` — one model call per query against a rate-limited free
+    tier would otherwise burn the quota. With no ``answer_generator`` this behaves exactly as
+    the retrieval-only run.
     """
     ingest_documents(vector_store, embedding_provider, corpus.documents, user_id=user_id)
 
@@ -85,15 +95,37 @@ def run_live_evaluation(
     )
 
     examples: list[EvaluationExample] = []
-    for query in corpus.queries:
+    for index, query in enumerate(corpus.queries):
         context = retrieval_service.retrieve(query.question, user_id=user_id, top_k=top_k)
+
+        answer_language: str | None = None
+        cited_document_ids: tuple[str, ...] = ()
+        faithful: bool | None = None
+
+        should_generate = answer_generator is not None and (
+            generate_limit is None or index < generate_limit
+        )
+        if answer_generator is not None and should_generate:
+            generated = answer_generator.generate_answer(context=context)
+            answer_language = generated.language
+            # De-duplicate: several cited chunks can share a document.
+            cited_document_ids = tuple(
+                dict.fromkeys(citation.document_id for citation in generated.citations)
+            )
+            if judge is not None:
+                faithful = judge.is_supported(
+                    answer=generated.answer, context=format_context(context)
+                )
+
         examples.append(
             EvaluationExample(
                 question=query.question,
                 expected_document_ids=query.expected_document_ids,
                 retrieved_document_ids=tuple(result.document_id for result in context.results),
                 expected_language=query.language,
-                answer_language=None,
+                answer_language=answer_language,
+                cited_document_ids=cited_document_ids,
+                faithful=faithful,
             )
         )
     return tuple(examples)

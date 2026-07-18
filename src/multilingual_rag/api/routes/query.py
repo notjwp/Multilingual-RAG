@@ -19,7 +19,9 @@ from multilingual_rag.core.models import (
 )
 from multilingual_rag.embeddings.factory import build_embedding_provider
 from multilingual_rag.generation.base import AnswerGenerator
-from multilingual_rag.generation.openai_generator import OpenAIAnswerGenerator
+from multilingual_rag.generation.openai_compatible_generator import (
+    OpenAICompatibleAnswerGenerator,
+)
 from multilingual_rag.retrieval.service import RetrievalService
 from multilingual_rag.vectorstores.base import MetadataValue, VectorFilter
 from multilingual_rag.vectorstores.chroma_store import ChromaVectorStore
@@ -140,7 +142,7 @@ def get_query_service(request: Request) -> QueryService:
     )
     return RagQueryService(
         retrieval_service=retrieval_service,
-        answer_generator=OpenAIAnswerGenerator(settings),
+        answer_generator=OpenAICompatibleAnswerGenerator(settings),
     )
 
 

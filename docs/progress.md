@@ -19,7 +19,8 @@ Working reference for where this project stands. Updated as work lands.
 | A | Security (P0) | ✅ **done** — leak closed, 55 tests green |
 | B | Make it measurable | ✅ **done** — real citations + free live retrieval eval |
 | C | Multilingual correctness (C1–C3) | ✅ **done** — CJK chunking fixed, bge-m3 in prod, no regression (0.902) |
-| C4 | Free generation (OpenRouter) | ⬜ next |
+| C4 | Free generation (OpenAI-compatible) | ✅ **DONE** — live NIM query verified, zero OpenAI calls |
+| — | Indic languages (hi/kn/te) | ⬜ next — romanized spike first |
 | D | Async + infra | ⬜ not started |
 
 ---
@@ -133,13 +134,53 @@ Scoped to C1–C3 (fully offline, no signup/spend); C4 (generation) is its own n
   answer language is correct unless codes are normalized. Normalize (e.g. `zh-cn` → `zh`) when
   wiring generation eval in C4.
 
-### Phase C4 — Free generation (next)
-- ⬜ OpenRouter/Qwen2.5-72B generator (OpenAI-compatible `chat.completions`; reuse
-  `parse_cited_results` + `resolve_answer_language`) — needs a free OpenRouter key (one signup)
-- ⬜ `OpenRouterFaithfulnessJudge` impl for the B `FaithfulnessJudge` port
-- ⬜ extend harness to run generation → citation precision/recall, faithfulness, language match
-  (closes Phase B's deferral); normalize language codes (see finding above)
-- ⬜ re-index Chroma (1024-dim) — already done during C verification
+### Phase C4 — Free generation ✅ code complete, ⏳ live verification blocked on an API key
+- ✅ **`OpenAICompatibleAnswerGenerator`** (`generation/openai_compatible_generator.py`) — one
+  adapter for *any* OpenAI-compatible `chat.completions` endpoint. Reuses `build_answer_prompt`,
+  `parse_cited_results`, `resolve_answer_language`. 429 → `generation_rate_limited`; a vanished
+  model → `generation_model_unavailable` **naming `GENERATION_MODEL`** (catalogs rotate).
+- ✅ **The provider is a URL, not a code path.** `GENERATION_BASE_URL` selects NVIDIA NIM
+  (default), OpenRouter, Groq, a local Ollama/vLLM shim, or OpenAI — **zero code change**.
+  Tested: `test_provider_is_just_a_url_not_a_code_path`.
+- ✅ **Env-driven:** `GENERATION_BASE_URL`, `GENERATION_API_KEY`, `GENERATION_MODEL`.
+  `.env.example` ships NIM as default with the alternatives as commented one-liners.
+- ✅ **Collapsed two adapters + an enum into one.** Deleted `generation/openai_generator.py`
+  (Responses API — redundant, OpenAI is reachable via `base_url`) and `generation/factory.py`
+  (a factory with one option is noise). Dropped the incoherent
+  `generation_provider: ["openai-compatible","openai"]` enum — OpenAI *is* OpenAI-compatible.
+- ✅ Boot guard: production/staging refuse to start without `GENERATION_API_KEY`
+  (local/test stay permissive so the suite runs — generator raises a named `AppError` if used).
+- ✅ `LlmFaithfulnessJudge` (`evaluation/llm_judge.py`) implements B's Protocol.
+- ✅ `normalize_language_code` — **kills the `zh-cn` vs `zh` false-zero** in
+  `language_match_rate` (normalized on both sides, inside the metric so it can't be bypassed).
+- ✅ Harness generation eval: optional generator + judge, **sampled** (`--gen-sample`, default
+  50) so a free-tier quota survives; retrieval still covers the full corpus. Generation metrics
+  score **only generated examples** — otherwise a sampled run would look broken.
+- ✅ `run.py --generate / --judge / --gen-sample`. Retrieval-only path verified unchanged.
+- ✅ 80 passed + 2 skipped; ruff + mypy clean. `grep -ri openrouter src/` → only provider-example
+  docs; no vendor name in any identifier or config key.
+- ✅ **Live-verified** against NVIDIA NIM: generation returns a grounded, `[1]`-cited answer
+  with **zero OpenAI calls**. The whole `/v1/query` path is now free.
+- ✅ **Added a request timeout** (`generation_timeout_seconds`, default 60) after a live
+  incident: `meta/llama-3.3-70b-instruct` **hung** on NIM's free tier (cold/overloaded), and the
+  SDK's 600s default would have blocked the request for 10 min. Now → 504 `generation_timeout`
+  with an actionable message. Default model switched to **`meta/llama-3.1-8b-instruct`** (verified
+  responds in ~1.5s). Diagnosis: the 8B answered instantly through the same path, proving key +
+  network + adapter were all fine — only the 70B was unresponsive.
+- ✅ **Full feature test done** (live, this session):
+  - 82/82 tests pass with `RUN_MODEL_TESTS=1` (incl. real bge-m3 embed + CJK chunker).
+  - **Indic generation works**: NIM Llama-3.1-8B answers grounded + cited in **Hindi, Kannada,
+    Telugu native script** (and zh) — C2 language resolution fills in from evidence for the
+    short "unknown" queries.
+  - End-to-end eval `--live --generate --judge`: recall@5 0.995 (200-doc sample), citation
+    precision 0.8 / recall 0.6, faithfulness 1.0, language_match 1.0 (non-zero ✓), generation
+    sampled 5/200.
+- ⏳ Not yet done: full-stack HTTP path (`/v1/query` via uvicorn+worker+Postgres+Redis). The
+  API security features (401, cross-tenant isolation, upload cap) are covered by integration
+  tests but not exercised against a live server.
+- ⚠️ NIM free tier is **credit-based** (1000 credits, 40 RPM) — finite. Hence `--gen-sample 20`.
+- ⚠️ Free-tier large models can hang; keep a small responsive model as the default and treat
+  the model id as an env knob (`GENERATION_MODEL`).
 
 ### Phase D — Async + infra (~1 week)
 - ⬜ D1 async core (ports + services + adapters)
