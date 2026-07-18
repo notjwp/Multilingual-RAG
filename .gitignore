@@ -19,3 +19,15 @@ data/raw/
 # Eval distractors are pure derivation: regenerate with scripts/build_eval_corpus.py
 # (pinned dataset revisions + SEED=42 make it byte-identical). Gold/queries ARE committed.
 data/eval/xquad/distractors_*.jsonl
+
+# Throwaway measurement spikes (M0, Indic, ...): built, measured, deleted. Never committed —
+# the graduated report lives in docs/. This is a safety net against accidental 60MB commits.
+spikes/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp

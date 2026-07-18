@@ -1,11 +1,40 @@
+# Keep the build context small and secret-free. The Dockerfile only COPYs pyproject.toml,
+# README.md, alembic.ini, alembic/, src/, scripts/ — everything else is context bloat.
+
+# Secrets — must never enter the image
 .env
+.env.local
+
+# Virtualenv (~5 GB with torch) and VCS
 .venv
+.git
+.gitignore
+.dockerignore
+
+# Python / tooling caches and build artifacts
 __pycache__
+*.py[cod]
 .pytest_cache
 .mypy_cache
 .ruff_cache
-data/chroma
-data/raw
-data/document_store.json
+.coverage
+htmlcov
+dist
+build
+*.egg-info
+
+# Runtime data — mounted as a volume at runtime, never baked in
+data/
 logs
 
+# Not needed in the runtime image
+tests
+docs
+spikes
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea
+.vscode

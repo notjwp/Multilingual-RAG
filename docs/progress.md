@@ -20,7 +20,8 @@ Working reference for where this project stands. Updated as work lands.
 | B | Make it measurable | ✅ **done** — real citations + free live retrieval eval |
 | C | Multilingual correctness (C1–C3) | ✅ **done** — CJK chunking fixed, bge-m3 in prod, no regression (0.902) |
 | C4 | Free generation (OpenAI-compatible) | ✅ **DONE** — live NIM query verified, zero OpenAI calls |
-| — | Indic languages (hi/kn/te) | ⬜ next — romanized spike first |
+| — | Indic romanized spike (Hindi) | ✅ done — romanized collapses (0.08 retention); transliterate→native recovers to 0.75. **Build it.** See docs/indic-romanized-spike.md |
+| — | Indic query-path feature (build) | ⬜ next — transliterate romanized→native before embed |
 | D | Async + infra | ⬜ not started |
 
 ---
