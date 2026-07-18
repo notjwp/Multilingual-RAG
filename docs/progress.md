@@ -175,9 +175,16 @@ Scoped to C1–C3 (fully offline, no signup/spend); C4 (generation) is its own n
   - End-to-end eval `--live --generate --judge`: recall@5 0.995 (200-doc sample), citation
     precision 0.8 / recall 0.6, faithfulness 1.0, language_match 1.0 (non-zero ✓), generation
     sampled 5/200.
-- ⏳ Not yet done: full-stack HTTP path (`/v1/query` via uvicorn+worker+Postgres+Redis). The
-  API security features (401, cross-tenant isolation, upload cap) are covered by integration
-  tests but not exercised against a live server.
+- ✅ **Full-stack HTTP path verified live** (Postgres+Redis+uvicorn+Celery worker+bge-m3+Chroma
+  +NIM): signup→JWT; 401 without token; reserved-filter→400; **cross-tenant isolation** (2nd
+  user sees 0 of the 1st's docs); async upload→Celery ingest→succeeded; a Chinese doc ingested
+  as **2 chunks** (C1 fix through the real pipeline); Chinese query returned a grounded, cited
+  answer **in Chinese with zero OpenAI calls**; cross-lingual en-query→zh-doc retrieved. All
+  passed.
+- 🐛 **Fixed a real bug found during the run:** Alembic migrations required `psycopg2` (env.py
+  rewrites the async URL to a sync one) but it was never a dependency — so migrations had never
+  worked against Postgres. Added `psycopg2-binary` to `pyproject.toml`. (This is exactly the
+  "DB layer never exercised" gap the audit flagged; D9 covers real DB tests.)
 - ⚠️ NIM free tier is **credit-based** (1000 credits, 40 RPM) — finite. Hence `--gen-sample 20`.
 - ⚠️ Free-tier large models can hang; keep a small responsive model as the default and treat
   the model id as an env knob (`GENERATION_MODEL`).
