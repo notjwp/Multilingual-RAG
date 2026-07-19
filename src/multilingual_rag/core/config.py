@@ -50,7 +50,6 @@ class Settings(BaseSettings):
     chroma_collection_name: str = "multilingual_documents"
     raw_document_directory: Path = Path("data/raw")
     max_upload_bytes: int = Field(default=25_000_000, gt=0)
-    document_store_path: Path = Path("data/document_store.json")
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/multilingual_rag"
     jwt_secret_key: SecretStr = SecretStr(DEFAULT_JWT_SECRET)
     jwt_algorithm: str = "HS256"

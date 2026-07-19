@@ -48,9 +48,10 @@ The entire RAG core — ingestion, chunking, embedding, vector I/O, retrieval, g
 - `RagQueryService.answer_query` is a **sync** method called from an **async** route.
 - The Celery worker bridges back to async with `asyncio.run()` (`workers/celery_app.py:25`).
 
-> This is a deliberate current-state choice, and it is also a known limitation: sync network
-> I/O on the event loop serializes concurrent queries (see §7). Phase D converts the core to
-> async.
+> This is a deliberate choice: the core stays sync (local models + a sync generation client can't
+> be truly async). Phase D (D1) stopped it blocking the event loop by offloading the whole call
+> via `await asyncio.to_thread(...)` in the query route, so concurrent queries no longer serialize
+> — the "sync core, async edge" split is preserved rather than rewritten.
 
 ### 1.3 Request flows
 
@@ -105,8 +106,9 @@ keyword-only argument on the `VectorStore` protocol (`upsert_chunks`/`search`/`d
 — a forgotten call site is a mypy error, not a silent leak. `ChromaVectorStore` scopes search
 with `{"$and": [{"user_id": …}, <client filters>]}` (un-widenable), namespaces storage ids as
 `{user_id}:{chunk_id}` so identical cross-user uploads don't collide, and rejects a client
-`user_id` filter (`reserved_filter_key`). Content-addressed dedup that supersedes the
-namespacing is Phase D (D6).
+`user_id` filter (`reserved_filter_key`). Phase D (D6) added content-addressed dedup on top:
+`document_id = uuid5(NAMESPACE_URL, f"{user_id}:{checksum}")` with a `(user_id, checksum)` unique
+constraint, so a user re-uploading identical content updates in place instead of duplicating.
 
 ### 1.6 Tech stack & data stores
 
@@ -323,8 +325,8 @@ the fix-in-place plan (Phases A–D); status is tracked in `docs/progress.md`.
 | ~~Multilingual~~ ✅ | ~~`\S+` collapses CJK/Thai to one chunk~~ — **fixed in C1**: `TextChunker` windows over bge-m3 token ids (`ingestion/tokenizer.py`); a long Chinese doc now yields many chunks | C ✅ |
 | ~~Multilingual~~ ✅ | ~~`"unknown"` language leaks into the prompt~~ — **fixed in C2**: `resolve_answer_language` falls back to evidence language, then `en` | C ✅ |
 | ~~Model~~ ✅ | ~~still on OpenAI embeddings~~ — **fixed in C3**: bge-m3 (1024-dim, no prefixes) is the default via `embeddings/factory.py`; OpenAI stays available behind config | C ✅ |
-| Runtime | Sync core blocks the event loop; clients built per-request in `get_query_service` | D |
-| Runtime | Embedded Chroma shared by api + worker processes (SQLite writer contention) | D |
-| Data | `DELETE /v1/documents/{id}` bulk-deletes bypassing ORM cascade; no FK `ondelete` → IntegrityError on real Postgres | D |
-| Data | Dual write upserts Chroma before Postgres → orphan vectors on failure; dedup defeated by uuid4-in-path; file "checksum" hashes the path string | D |
-| Testing | DB/worker layer has zero coverage (every route test injects a fake) | D |
+| ~~Runtime~~ ✅ | ~~Sync core blocks the event loop; clients built per-request~~ — **fixed in D1/D3**: the query route offloads the blocking core via `asyncio.to_thread`; the query service is built once and memoized on `app.state` | D ✅ |
+| ~~Data~~ ✅ | ~~`DELETE /v1/documents/{id}` bypasses ORM cascade; no FK `ondelete` → IntegrityError~~ — **fixed in D4**: child FKs are `ondelete=CASCADE` (`SET NULL` on `ingestion_jobs`) + migration `0002`; live DELETE now returns 200 | D ✅ |
+| ~~Data~~ ✅ | ~~Chroma upserted before Postgres → orphan vectors; dedup defeated by uuid4-in-path; file "checksum" hashed the path~~ — **fixed in D5/D6/D7**: DB-first write with compensating vector delete; `document_id = uuid5(user_id:checksum)` + `(user_id, checksum)` unique (migration `0003`); checksum is the content hash | D ✅ |
+| ~~Testing~~ ✅ | ~~DB/worker layer has zero coverage~~ — **fixed in D9**: `tests/integration/test_db_layer.py` exercises repositories + `run_ingestion_job` against real Postgres (gated skip when unreachable); the legacy `DocumentStore` path was deleted in D8 | D ✅ |
+| Runtime | Embedded Chroma shared by api + worker processes (SQLite writer contention) | **Deferred** (over-engineering for one machine; revisit for multi-user deploy) |

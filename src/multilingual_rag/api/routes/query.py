@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Protocol, cast
 
 from fastapi import APIRouter, Depends, Request, status
@@ -123,27 +124,34 @@ async def query(
 ) -> QueryResponse:
     """Answer a user query with retrieval-augmented generation."""
     query_service = get_query_service(request)
-    return query_service.answer_query(request_body, user_id=current_user.user_id)
+    # The RAG core is synchronous and blocking (local bge-m3 embedding, Chroma search, a
+    # generation HTTP call) — offload it so it doesn't stall the event loop for other requests.
+    return await asyncio.to_thread(
+        query_service.answer_query, request_body, user_id=current_user.user_id
+    )
 
 
 def get_query_service(request: Request) -> QueryService:
-    """Return an injected or default query service."""
+    """Return an injected or default query service, built once and memoized on app.state."""
     existing_service = getattr(request.app.state, "query_service", None)
     if existing_service is not None:
         return cast(QueryService, existing_service)
 
     settings = cast(Settings, request.app.state.settings)
-    embedding_provider = build_embedding_provider(settings)
     vector_store = ChromaVectorStore(settings)
     retrieval_service = RetrievalService(
         settings,
-        embedding_provider=embedding_provider,
+        embedding_provider=build_embedding_provider(settings),
         vector_store=vector_store,
     )
-    return RagQueryService(
+    service = RagQueryService(
         retrieval_service=retrieval_service,
         answer_generator=OpenAICompatibleAnswerGenerator(settings),
     )
+    # Cache so the Chroma client and adapters aren't rebuilt on every request. Lazy (not in the
+    # lifespan) so the offline test suite never loads the 2.2 GB model at startup.
+    request.app.state.query_service = service
+    return service
 
 
 def query_response_from_models(answer: GeneratedAnswer, context: RetrievalContext) -> QueryResponse:

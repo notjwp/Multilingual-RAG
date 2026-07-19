@@ -42,7 +42,11 @@ class Document(Base):
     """User-owned document metadata."""
 
     __tablename__ = "documents"
-    __table_args__ = (Index("ix_documents_user_status", "user_id", "ingestion_status"),)
+    __table_args__ = (
+        Index("ix_documents_user_status", "user_id", "ingestion_status"),
+        # One document per (user, content) — the content-addressed dedup safety net.
+        UniqueConstraint("user_id", "checksum", name="uq_documents_user_checksum"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
@@ -82,7 +86,7 @@ class DocumentFile(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     document_id: Mapped[str] = mapped_column(
         String(64),
-        ForeignKey("documents.id"),
+        ForeignKey("documents.id", ondelete="CASCADE"),
         nullable=False,
         unique=True,
     )
@@ -104,7 +108,7 @@ class IngestionJob(Base):
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
     document_id: Mapped[str | None] = mapped_column(
         String(64),
-        ForeignKey("documents.id"),
+        ForeignKey("documents.id", ondelete="SET NULL"),
         nullable=True,
     )
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
@@ -165,7 +169,9 @@ class MessageCitation(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     message_id: Mapped[str] = mapped_column(String(36), ForeignKey("messages.id"), nullable=False)
-    document_id: Mapped[str] = mapped_column(String(64), ForeignKey("documents.id"), nullable=False)
+    document_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
     chunk_id: Mapped[str] = mapped_column(String(128), nullable=False)
     source: Mapped[str] = mapped_column(Text, nullable=False)
     page: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -178,7 +184,9 @@ class DocumentChunk(Base):
     __table_args__ = (UniqueConstraint("document_id", "chunk_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
-    document_id: Mapped[str] = mapped_column(String(64), ForeignKey("documents.id"), nullable=False)
+    document_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
     chunk_id: Mapped[str] = mapped_column(String(128), nullable=False)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     language: Mapped[str] = mapped_column(String(16), nullable=False)

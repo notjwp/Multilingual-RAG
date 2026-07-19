@@ -2,9 +2,10 @@
 
 Working reference for where this project stands. Updated as work lands.
 
-**Last updated:** 2026-07-16
+**Last updated:** 2026-07-19
 **Current decision:** Fix-in-place (Phases A–D). Rebuild rejected on evidence.
-**Next action:** Phase C4 (free OpenRouter generation). Phases A + B ✅, Phase C (C1–C3) code complete.
+**Next action:** commit Phase D (uncommitted), then build the Indic romanized query-path feature.
+Phases A, B, C, C4, D all ✅.
 
 ---
 
@@ -21,8 +22,8 @@ Working reference for where this project stands. Updated as work lands.
 | C | Multilingual correctness (C1–C3) | ✅ **done** — CJK chunking fixed, bge-m3 in prod, no regression (0.902) |
 | C4 | Free generation (OpenAI-compatible) | ✅ **DONE** — live NIM query verified, zero OpenAI calls |
 | — | Indic romanized spike (Hindi) | ✅ done — romanized collapses (0.08 retention); transliterate→native recovers to 0.75. **Build it.** See docs/indic-romanized-spike.md |
+| D | Correctness + light scale | ✅ **DONE** — broken DELETE fixed (live), dedup, DB tests, threadpool, no regression |
 | — | Indic query-path feature (build) | ⬜ next — transliterate romanized→native before embed |
-| D | Async + infra | ⬜ not started |
 
 ---
 
@@ -190,16 +191,31 @@ Scoped to C1–C3 (fully offline, no signup/spend); C4 (generation) is its own n
 - ⚠️ Free-tier large models can hang; keep a small responsive model as the default and treat
   the model id as an env knob (`GENERATION_MODEL`).
 
-### Phase D — Async + infra (~1 week)
-- ⬜ D1 async core (ports + services + adapters)
-- ⬜ D2 Chroma server mode (`AsyncHttpClient` + compose service)
-- ⬜ D3 lifespan singletons (`app.state`)
-- ⬜ D4 fix broken `DELETE` — FK `ondelete=CASCADE` + migration
-- ⬜ D5 DB-first dual-write with compensation
-- ⬜ D6 content-addressed dedup + `(user_id, checksum)` constraint
-- ⬜ D7 fix bogus file checksum (`repository.py:70`)
-- ⬜ D8 delete legacy `DocumentStore` path
-- ⬜ D9 DB-layer tests against real Postgres
+### Phase D — Correctness + light scale ✅ DONE
+Scoped to correctness + cheap robustness (Chroma server mode + torch-image slimming deferred as
+over-engineering for one machine). Sequenced tests-first so they exposed the bugs before fixing.
+- ✅ D9 DB-layer tests against **real Postgres** (`tests/integration/test_db_layer.py`, gated —
+  skip if Postgres unreachable; added `pytest-asyncio`). The coverage that was missing; wrote
+  bug-pinning tests RED, then fixed to green. Also the first-ever `run_ingestion_job` test.
+- ✅ D4 broken `DELETE` fixed — `ondelete="CASCADE"` on child FKs (`SET NULL` on
+  `ingestion_jobs.document_id`) in `db/models.py` + migration `0002`. **Verified live:**
+  `DELETE /v1/documents/{id}` now returns 200 (was `IntegrityError`).
+- ✅ D7 file checksum = content hash (`repository.py`), not the path string.
+- ✅ D6 content-addressed **and user-scoped** dedup: `document_id = uuid5(f"{user_id}:{checksum}")`
+  (was mixing a per-upload uuid4 path in) + `(user_id, checksum)` unique constraint (migration
+  `0003`). **Verified live:** two identical uploads → one document, same id. (Refinement of the
+  approved plan: user-scoping avoids a cross-tenant clobber that checksum-alone would introduce.)
+- ✅ D5 dual-write compensation in `run_ingestion_job` — DB rows then vectors then one commit;
+  best-effort vector cleanup on failure; refactored to inject deps for testing. The D5 test caught
+  a real bug in the fix (reading a rolled-back ORM object silently no-op'd cleanup → capture
+  fields into locals first).
+- ✅ D8 legacy `DocumentStore` / `DocumentIndexingService` / `document_store_path` deleted.
+- ✅ D1 offload the blocking RAG core to a threadpool (`await asyncio.to_thread(...)` in the query
+  route) — not an async rewrite (local models + sync client can't be truly async).
+- ✅ D3 memoize the query service on `app.state` (built once, not per request; lazy so the offline
+  suite never loads the 2.2 GB model at startup).
+- ✅ Gates green throughout; 87 passed with `RUN_MODEL_TESTS=1`. Eval unchanged (recall@5 0.995 on
+  the sample — retrieval untouched). **Deferred:** Chroma server mode, torch-image slimming.
 
 ---
 

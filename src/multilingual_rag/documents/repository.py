@@ -19,7 +19,6 @@ from multilingual_rag.db.models import (
     IngestionJob,
     IngestionStatus,
 )
-from multilingual_rag.ingestion.service_utils import checksum_text
 
 
 class DocumentRepository:
@@ -67,7 +66,7 @@ class DocumentRepository:
                 filename=filename,
                 content_type=record.document.content_type,
                 size_bytes=file_size_bytes,
-                checksum=checksum_text(str(file_path)),
+                checksum=record.document.checksum,
             )
         )
         self.session.add_all(

@@ -35,12 +35,14 @@ class IngestionService:
             chunk_overlap_tokens=settings.chunk_overlap_tokens,
         )
 
-    def ingest_file(self, path: Path) -> IngestionResult:
+    def ingest_file(self, path: Path, *, user_id: str) -> IngestionResult:
         """Load a file from disk and convert it into indexable chunks."""
         loaded_document = self.loader.load(path)
-        return self.ingest_loaded_document(loaded_document)
+        return self.ingest_loaded_document(loaded_document, user_id=user_id)
 
-    def ingest_loaded_document(self, loaded_document: LoadedDocument) -> IngestionResult:
+    def ingest_loaded_document(
+        self, loaded_document: LoadedDocument, *, user_id: str
+    ) -> IngestionResult:
         """Convert a loaded document into metadata and chunks."""
         document_text = normalize_text(
             " ".join(section.text for section in loaded_document.sections if section.text.strip())
@@ -53,7 +55,11 @@ class IngestionService:
             )
 
         checksum = checksum_text(document_text)
-        document_id = str(uuid5(NAMESPACE_URL, f"{loaded_document.source_path}:{checksum}"))
+        # Content-addressed and user-scoped: same user re-uploading identical content gets the
+        # same id (dedup via save's delete-then-insert); different users get distinct ids (no
+        # cross-tenant clobber). The old scheme mixed a per-upload uuid4 path into the id, so
+        # dedup never worked.
+        document_id = str(uuid5(NAMESPACE_URL, f"{user_id}:{checksum}"))
         language = self.language_detector.detect(document_text)
 
         metadata = DocumentMetadata(

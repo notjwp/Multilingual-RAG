@@ -50,7 +50,6 @@ services:
       CHROMA_PERSIST_DIRECTORY: ${CHROMA_PERSIST_DIRECTORY:-data/chroma}
       CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-multilingual_documents}
       RAW_DOCUMENT_DIRECTORY: ${RAW_DOCUMENT_DIRECTORY:-data/raw}
-      DOCUMENT_STORE_PATH: ${DOCUMENT_STORE_PATH:-data/document_store.json}
     ports:
       - "8000:8000"
     volumes:
@@ -88,7 +87,6 @@ services:
       CHROMA_PERSIST_DIRECTORY: ${CHROMA_PERSIST_DIRECTORY:-data/chroma}
       CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-multilingual_documents}
       RAW_DOCUMENT_DIRECTORY: ${RAW_DOCUMENT_DIRECTORY:-data/raw}
-      DOCUMENT_STORE_PATH: ${DOCUMENT_STORE_PATH:-data/document_store.json}
     volumes:
       - ./data:/app/data
 

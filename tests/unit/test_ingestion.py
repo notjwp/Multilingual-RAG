@@ -31,13 +31,20 @@ def test_text_ingestion_produces_document_metadata_and_chunks(tmp_path: Path) ->
     )
     service = IngestionService(Settings(chunk_size_tokens=12, chunk_overlap_tokens=2))
 
-    result = service.ingest_file(source_path)
+    result = service.ingest_file(source_path, user_id="user-1")
 
     assert result.document.source == str(source_path.resolve())
     assert result.document.content_type == "text/plain"
     assert result.document.language == "en"
     assert len(result.chunks) >= 2
     assert all(chunk.document_id == result.document.document_id for chunk in result.chunks)
+
+    # D6: content-addressed + user-scoped. Same user + same content -> same id (dedup);
+    # a different user -> a different id (no cross-tenant clobber).
+    again = service.ingest_file(source_path, user_id="user-1")
+    other = service.ingest_file(source_path, user_id="user-2")
+    assert again.document.document_id == result.document.document_id
+    assert other.document.document_id != result.document.document_id
 
 
 def test_html_loader_removes_script_content(tmp_path: Path) -> None:
@@ -96,4 +103,4 @@ def test_ingestion_rejects_empty_document(tmp_path: Path) -> None:
     service = IngestionService(Settings())
 
     with pytest.raises(AppError, match="extractable text"):
-        service.ingest_file(source_path)
+        service.ingest_file(source_path, user_id="user-1")
