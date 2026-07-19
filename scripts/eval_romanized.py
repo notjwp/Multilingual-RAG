@@ -117,7 +117,9 @@ def main() -> None:
             }
             # The shipped path: transliterate only when detected as romanized Hindi, else search
             # the raw query untouched (exactly what RetrievalService does in production).
-            detected = is_romanized_indic(roman, ("hi",))
+            detected = is_romanized_indic(
+                roman, ("hi",), detector=settings.transliteration_detector
+            )
             n_detected += detected
             retrieved["shipped"] = (
                 retrieved["transliterated"] if detected else retrieved["romanized-raw"]

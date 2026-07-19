@@ -50,6 +50,11 @@ class Settings(BaseSettings):
         "google"
     )
     transliteration_languages: tuple[str, ...] = ("hi",)
+    # How to decide a query is romanized Hindi (whether to transliterate). "word-list" (default) is
+    # a fast local function-word check; "muril" opts into a MuRIL feature + LR classifier (downloads
+    # a ~950 MB model, adds a forward pass per Latin query — no measured accuracy gain over the word
+    # list on the eval, but generalizes better to real-world spelling variants).
+    transliteration_detector: Literal["word-list", "muril"] = "word-list"
 
     # Only used when embedding_provider is "openai".
     openai_api_key: SecretStr | None = None

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "multilingual-rag"
 version = "0.1.0"
-description = "Production-ready multilingual RAG pipeline with OpenAI and ChromaDB."
+description = "Free-by-default multilingual RAG pipeline (local bge-m3 embeddings, ChromaDB, romanized-Hindi query support)."
 readme = "README.md"
 requires-python = ">=3.13"
 license = { text = "MIT" }
@@ -27,7 +27,11 @@ dependencies = [
   # web client — network-dependent) with indic-transliteration (sanscript) as the local fallback.
   "googletrans>=4.0.2",
   "indic-transliteration>=2.3.0",
+  # Optional MuRIL-based romanized-Hindi detector (TRANSLITERATION_DETECTOR=muril): the LR head
+  # is scikit-learn; MuRIL itself comes via transformers (already present).
+  "joblib>=1.4",
   "langdetect>=1.0.9",
+  "scikit-learn>=1.5",
   "openai>=1.59.7",
   "pydantic>=2.10.4",
   "pydantic-settings>=2.7.1",

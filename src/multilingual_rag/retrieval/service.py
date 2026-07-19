@@ -72,7 +72,10 @@ class RetrievalService:
         Also skips when the transliterator returns the input unchanged (a no-op).
         """
         languages = self.settings.transliteration_languages
-        if self.transliterator is None or not is_romanized_indic(query, languages):
+        detector = self.settings.transliteration_detector
+        if self.transliterator is None or not is_romanized_indic(
+            query, languages, detector=detector
+        ):
             return None
         transliterated = self.transliterator.transliterate(query, target_language=languages[0])
         if not transliterated.strip() or transliterated.strip() == query.strip():

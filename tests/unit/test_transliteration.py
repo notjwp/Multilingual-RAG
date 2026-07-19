@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from multilingual_rag.core.config import Settings
+from multilingual_rag.transliteration import detect as detect_mod
 from multilingual_rag.transliteration.detect import is_romanized_indic
 from multilingual_rag.transliteration.factory import build_transliterator
 from multilingual_rag.transliteration.google import GoogleTransliterator
@@ -70,6 +71,36 @@ def test_is_romanized_indic_rejects_non_hindi(text: str) -> None:
 def test_is_romanized_indic_off_when_hi_not_configured() -> None:
     assert is_romanized_indic("bharat kya hai", ()) is False
     assert is_romanized_indic("bharat kya hai", ("kn",)) is False
+
+
+# --- MuRIL detector gating (opt-in; fallback + degradation, no model load) -------------------
+
+
+def test_muril_detector_falls_back_to_wordlist_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No artifact / no torch (fresh checkout) → _load_detector returns None → the word list decides,
+    # so selecting detector="muril" can never hard-break detection.
+    detect_mod._state["degraded"] = False
+    monkeypatch.setattr(detect_mod, "_load_detector", lambda: None)
+    assert is_romanized_indic("bharat kya hai", _HI, detector="muril") is True
+    assert is_romanized_indic("what is the capital of france", _HI, detector="muril") is False
+
+
+def test_muril_detector_degrades_to_wordlist_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    detect_mod._state["degraded"] = False
+
+    class _Boom:
+        def predict(self, text: str) -> bool:
+            raise RuntimeError("muril exploded")
+
+    monkeypatch.setattr(detect_mod, "_load_detector", lambda: _Boom())
+    # The failing call logs, marks degraded, and falls back to the word list (correct result).
+    assert is_romanized_indic("bharat kya hai", _HI, detector="muril") is True
+    assert detect_mod._state["degraded"] is True
+    detect_mod._state["degraded"] = False  # don't leak state to other tests
 
 
 # --- rule-based adapter ----------------------------------------------------------------------

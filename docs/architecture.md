@@ -88,12 +88,11 @@ The upload endpoint does **not** index inline. It saves bytes, writes a `queued`
 Celery, and returns a `job_id`. The worker runs `documents/jobs.py::run_ingestion_job`. Clients
 poll `GET /v1/ingestion-jobs/{job_id}`.
 
-### 1.4 Two document paths coexist
+### 1.4 One document path
 
-| Path | Storage | Scoping | Status |
-|---|---|---|---|
-| `DatabaseDocumentIndexingService` | PostgreSQL + Celery | per-`user_id` | **preferred** — what the routes use |
-| `DocumentIndexingService` + `DocumentStore` | JSON file (`data/document_store.json`) | none | legacy; still tested; slated for deletion |
+`DatabaseDocumentIndexingService` (PostgreSQL + Celery, per-`user_id`) is the only path. The
+legacy `DocumentIndexingService` + `DocumentStore` (an unscoped JSON file) was removed in Phase D
+(D8) — a single source of truth, no drift.
 
 ### 1.5 Identity & tenancy
 
@@ -133,7 +132,14 @@ transliterate → search** step in `RetrievalService.retrieve`:
   (plain English) → search the raw query untouched, so English stays same-language.
 - Precision is prioritized (a false positive would mis-transliterate a real English query):
   markers exclude English collisions (`the`, `is`, `to`, `me`), giving 0 English false positives
-  and ~0.83 recall on the hard IAST-strip eval forms (higher on natural typing) in the eval.
+  and ~0.98 recall on the eval (higher on natural typing).
+- **The detector is swappable** (`TRANSLITERATION_DETECTOR`): `word-list` (default) or `muril` — a
+  frozen `google/muril-base-cased` feature extractor (`transliteration/muril.py`, mean-pooled 768-d)
+  + a committed LogisticRegression head (`scripts/train_romanized_detector.py`, trained on
+  romanized-hi vs en+es). MuRIL edges the word list on held-out recall (1.000 vs 0.983, at 0.002 FP)
+  by catching marker-less romanized queries, but costs a ~950 MB model + a per-query forward pass, so
+  it's opt-in; it loads lazily on CPU and **falls back to the word list on any failure** (no artifact,
+  no torch, offline), keeping a fresh checkout and the test suite fast and model-free.
 - Native-Devanagari, CJK, and Thai queries have no Latin Hindi markers, so they skip the path
   (searched as-is). The response carries `transliterated_query` / `transliteration_applied`.
 
@@ -172,25 +178,29 @@ ingestion/    parse → detect → chunk (sync)
   chunker.py             TextChunker — overlapping token windows
   service.py             IngestionService.ingest_file → IngestionResult
   service_utils.py       checksum_text
-embeddings/   port + adapter
+embeddings/   port + adapters + factory
   base.py                EmbeddingProvider protocol
-  openai_embeddings.py   batched embeddings, single-query embedding
+  bge_embeddings.py      local bge-m3 (default); openai_embeddings.py (behind config)
+  factory.py             build_embedding_provider
 vectorstores/ port + adapter
   base.py                VectorStore protocol; MetadataValue / VectorFilter types
   chroma_store.py        cosine; score = 1.0 - distance; meta_-prefixed custom metadata
 retrieval/    query-time
-  service.py             RetrievalService.retrieve → RetrievalContext
+  service.py             RetrievalService.retrieve → RetrievalContext (detect → transliterate)
   context.py             format_context — numbers chunks [1] [2] … for citation
 generation/   port + adapter
   base.py                AnswerGenerator protocol
-  openai_generator.py    OpenAI Responses API adapter
+  openai_compatible_generator.py  any chat.completions endpoint (NIM default) + ChatClient
+  citations.py / language.py      [n]-marker parsing / answer-language resolution
   prompts.py             SYSTEM_INSTRUCTIONS + build_answer_prompt
+transliteration/ port + adapters + factory (romanized-Hindi)
+  base.py / detect.py    Transliterator protocol; is_romanized_indic (word-list or MuRIL detector)
+  muril.py               frozen google/muril-base-cased feature extractor (opt-in detector)
+  google.py / indicxlit.py / rule_based.py / llm.py    adapters; factory.py selects by config
 documents/    DB-backed document lifecycle (async)
-  service.py             DatabaseDocumentIndexingService + legacy DocumentIndexingService
+  service.py             DatabaseDocumentIndexingService, save_upload_bytes
   repository.py          DocumentRepository, IngestionJobRepository
   jobs.py                run_ingestion_job (the Celery task body)
-storage/      legacy
-  document_store.py      DocumentStore — JSON file, atomic tmp+replace
 db/           persistence
   base.py / session.py   async engine + AsyncSessionFactory (engine at import time)
   models.py              ORM tables

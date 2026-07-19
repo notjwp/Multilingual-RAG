@@ -41,8 +41,8 @@ context managers.
 The trickiest conceptual thing in the repo. The RAG **core is sync**; the **edge is async**
 (`docs/architecture.md §1.2`).
 
-- A sync `RagQueryService.answer_query` is called from an async route — fine today, but it
-  blocks the event loop (a known defect; Phase D fixes it).
+- A sync `RagQueryService.answer_query` is called from an async route; Phase D stops it blocking
+  the loop by offloading via `await asyncio.to_thread(...)` in the query route (the core stays sync).
 - The Celery worker crosses back with `asyncio.run()` (`workers/celery_app.py`). Understand why
   a sync worker calls an async repository through that bridge.
 - **Import-time trap:** importing `db.session` or `workers.celery_app` builds a DB engine at
@@ -54,9 +54,9 @@ CPU/IO into an event loop serializes it.
 ## ●● SQLAlchemy 2.x (async) + Alembic
 
 - Async ORM: `AsyncSession`, `async_sessionmaker`, `Mapped[...]` / `mapped_column`.
-- **Core bulk `delete()` bypasses ORM `cascade`** — this is an active bug in
-  `documents/repository.py` (Phase D). Know the difference between session-level cascade and a
-  bulk DML `DELETE`.
+- **Core bulk `delete()` bypasses ORM `cascade`** — this broke `DELETE` until Phase D added FK
+  `ondelete="CASCADE"` (migration `0002`). Know the difference between session-level cascade and a
+  bulk DML `DELETE`, and that `ondelete` is enforced by Postgres, not the ORM.
 - Migrations derive the URL from `DATABASE_URL` and rewrite async→sync driver
   (`alembic/env.py`); `alembic.ini`'s URL is ignored.
 
@@ -80,7 +80,8 @@ a worker locally.
   read (`chroma_store.py`).
 - Filtering uses Mongo-style `where` clauses (`$and`, equality) — Phase A adds server-side
   `user_id` scoping this way.
-- Embedded Chroma is **not safe for concurrent multi-process writers** (Phase D → server mode).
+- Embedded Chroma is **not safe for concurrent multi-process writers** (server mode deferred as
+  over-engineering for one machine).
 
 **Learn if unfamiliar:** dense vector retrieval, cosine similarity, ANN vs exact search,
 metadata filtering, embedding dimensions (OpenAI 1536 vs bge-m3 1024 — not interchangeable in
@@ -97,8 +98,14 @@ one collection).
   Getting this wrong fails silently. bge-m3 is the selected model.
 - **Cross-lingual retrieval:** a query in language X retrieving documents in language Y. The
   retention ratio (cross ÷ monolingual recall) is how we measure it.
+- **Romanized script is a wall, not a dialect.** bge-m3 retrieves romanized Hindi at ~0.20 (the
+  language signal lives in the script); transliterating Latin→Devanagari before embedding recovers
+  it to ~0.67. The lesson from the eval: you can't fuse a raw-romanized search with a transliterated
+  one and win (the raw search is unavoidable noise) — **detect** whether to transliterate instead
+  (`transliteration/detect.py`), don't blend. See `docs/architecture.md §1.5b`.
 - **Language detection** (`langdetect`) is unreliable on short text — hence the `min_text_length`
-  fallback, and the `"unknown"`-leaks-into-the-prompt bug (Phase C).
+  fallback, and the `"unknown"`-leaks-into-the-prompt bug (fixed in Phase C). It's also
+  script-based, so it can't spot *romanized* Hindi at all — that needs the function-word detector.
 
 **Learn if unfamiliar:** subword tokenization (BPE/SentencePiece/XLM-R), sentence-transformers,
 query/passage asymmetry, cross-lingual embedding spaces.
@@ -119,15 +126,40 @@ query/passage asymmetry, cross-lingual embedding spaces.
 
 ## ● LLM generation & grounded answers
 
-- `AnswerGenerator` port; OpenAI Responses API adapter today, moving to a free-tier
-  OpenAI-compatible endpoint (OpenRouter/Groq) under the zero-budget constraint (Phase C).
+- `AnswerGenerator` port; one `OpenAICompatibleAnswerGenerator` serves any `chat.completions`
+  endpoint (NVIDIA NIM by default, also OpenRouter/Groq/Ollama/OpenAI) — the provider is a URL
+  (`GENERATION_BASE_URL`), not a code path. Zero-budget by default (free NIM tier).
 - **Grounding + citations:** context chunks are numbered `[1] [2]` (`retrieval/context.py`) and
-  the prompt asks the model to cite by bracket — but the current adapter ignores the markers
-  and cites everything (Phase B fix).
-- Free-tier **rate limits** shape design (sample, don't judge all 1190 eval questions).
+  the prompt asks the model to cite by bracket; `generation/citations.py` parses the markers and
+  cites only those (the Phase B fix — the old adapter cited every retrieved chunk).
+- Free-tier **rate limits** shape design (sample, don't judge all 1190 eval questions). The same
+  `ChatClient` is reused by the `llm` transliteration adapter.
 
 **Learn if unfamiliar:** RAG prompting, grounding/faithfulness, citation parsing, OpenAI-
 compatible API surfaces.
+
+## ● Transliteration (romanized-Indic query support)
+
+- `Transliterator` **port** (`transliteration/base.py`) with swappable adapters, selected by
+  `TRANSLITERATION_PROVIDER`. Default `google` (googletrans) uses a trick: `src="en", dest="hi"`
+  makes Google *transliterate* romanized Hindi rather than *translate* it (a plain `dest="hi"`
+  no-ops, since it detects the input as already-Hindi). It's a network call and an unofficial
+  scraper, so the adapter falls back to the local rule-based transliterator on any failure.
+- `indicxlit` is a local neural model (`psidharth567/indic-xlit-50M`, a Gemma-3 char-model) — the
+  AI4Bharat IndicXlit proper needs `fairseq`, which won't build on Py3.13; this one loads with
+  plain `transformers`. Revision-pinned, lazy-loaded, self-heals to rule-based on failure.
+- **The design lesson worth internalizing:** the intuitive "search both forms and merge" loses —
+  every fusion strategy dragged Hindi recall below pure transliteration because the raw search is
+  irreducible noise. Deciding *whether* to transliterate (a linguistic detector) beats hedging.
+- **Detector is swappable** (`TRANSLITERATION_DETECTOR`): a word list (default; ~98%/0-FP, free) or
+  MuRIL — `google/muril-base-cased` used *frozen* as a feature extractor + a LogisticRegression head
+  (`muril.py`, `scripts/train_romanized_detector.py`). MuRIL is the *right* Indic model (trained on
+  transliterated Hindi, unlike bge-m3 or CodeBERT), but for a task the word list nails it's opt-in
+  and lazy, with word-list fallback. Frozen-features + a tiny head beats fine-tuning a 236M model for
+  a binary decision.
+
+**Learn if unfamiliar:** transliteration vs translation, IAST/ITRANS schemes, `googletrans`
+async API, why script (not language) is what dense retrieval keys on.
 
 ## ● Auth & security primitives
 

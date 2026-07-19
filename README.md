@@ -1,136 +1,139 @@
 # Multilingual RAG
 
-Production-ready multilingual retrieval-augmented generation pipeline using Python 3.13,
-OpenAI, ChromaDB, and `langdetect`.
+A multilingual retrieval-augmented generation pipeline (Python 3.13, FastAPI, ChromaDB) that
+runs **free by default** — local `bge-m3` embeddings and a free OpenAI-compatible generation
+endpoint (NVIDIA NIM), no paid API required. Ports-and-adapters throughout, `mypy --strict`.
 
-## Current Milestone
+## Features
 
-Milestone 10 completes the first production-ready local pipeline:
+- **Free, local-first core.** Default embeddings are `bge-m3` (local, 1024-dim, strong
+  cross-lingual retrieval); generation targets any OpenAI-compatible endpoint (NVIDIA NIM by
+  default) — switching providers is a URL change, not code.
+- **Multilingual retrieval** with tokenizer-aware chunking (CJK/Thai don't split on whitespace)
+  and answer-language resolution.
+- **Romanized Indic queries (Hindi).** Type Hindi in the Latin alphabet
+  (`bharat ki rajdhani kya hai`) and it's detected, transliterated to Devanagari, and matched
+  against your native-script index. See [Romanized Hindi](#romanized-hindi-queries).
+- **Authenticated, multi-tenant.** JWT bearer auth; every user retrieves only their own
+  documents, enforced at the vector store, not just the metadata table.
+- **Asynchronous ingestion.** Upload returns a `job_id`; a Celery worker ingests → embeds →
+  indexes → records rows, and clients poll job status. Postgres is the source of truth.
+- **Measurable.** A live evaluation harness (recall@k / MRR / nDCG, citation precision/recall,
+  faithfulness) runs the real pipeline over the XQuAD corpus — free, no API calls.
 
-- Python package layout under `src/multilingual_rag`
-- Environment-driven settings
-- Standard JSON logging setup
-- Test and quality tooling configuration
-- FastAPI application factory
-- Health and readiness endpoints
-- Standard API error response schema
-- TXT, Markdown, HTML, PDF, and DOCX loaders
-- `langdetect` language detection
-- Deterministic overlapping text chunking
-- Document and chunk metadata models
-- Embedding provider protocol
-- OpenAI embedding client adapter
-- Batched document embeddings and single-query embeddings
-- Structured errors for missing API keys and provider failures
-- ChromaDB vector-store implementation
-- Retrieval service with metadata filters
-- OpenAI Responses-based answer generator
-- `POST /v1/query` endpoint with answer, citations, and retrieved chunks
-- Synchronous document upload, metadata lookup, and delete endpoints
-- File-backed document metadata store
-- Offline evaluation metrics and JSONL report CLI
-- Dockerfile, Docker Compose, and HTTP smoke test script
+## Stack
 
-## Planned Stack
+Python 3.13 · FastAPI · Pydantic v2 · SQLAlchemy 2 (async) + Alembic · Postgres · Celery + Redis
+· ChromaDB · `sentence-transformers` (bge-m3) · `googletrans` + `indic-transliteration`
+(romanized-Hindi) · pytest / ruff / mypy.
 
-- Python 3.13
-- FastAPI for HTTP APIs
-- OpenAI for embeddings and answer generation
-- ChromaDB for the initial vector store
-- `langdetect` for language detection
-- pytest, ruff, and mypy for verification
-
-## Local Setup
+## Local setup
 
 ```powershell
 py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-Copy `.env.example` to `.env` and set `OPENAI_API_KEY` before running milestones that call
-OpenAI.
+Copy `.env.example` to `.env`. Everything runs free out of the box; set `GENERATION_API_KEY`
+(a free NVIDIA NIM key from https://build.nvidia.com) to enable answer generation. Postgres and
+Redis are needed for anything touching documents or auth — `docker compose up postgres redis` is
+the quickest way.
 
 ## Verification
 
 ```powershell
 python -m pytest
-python -m ruff check .
+python -m ruff check .          # add --fix to autofix
 python -m mypy src
 ```
 
-## Run The API
+Model- and Postgres-backed tests are opt-in / auto-skipped: `RUN_MODEL_TESTS=1` exercises bge-m3;
+the DB-layer tests run when a local Postgres is reachable.
+
+## Run the stack
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn multilingual_rag.api.app:app --host 127.0.0.1 --port 8000
+python -m uvicorn multilingual_rag.api.app:app --host 127.0.0.1 --port 8000
+celery -A multilingual_rag.workers.celery_app.celery_app worker --loglevel=INFO
+alembic upgrade head
+docker compose up --build            # postgres + redis + api + worker
 ```
 
-Health endpoints:
+Endpoints (all under `/v1`, bearer token required except health):
 
-- `GET http://127.0.0.1:8000/healthz`
-- `GET http://127.0.0.1:8000/readyz`
+- `GET /healthz` · `GET /readyz`
+- `POST /v1/auth/signup` · `POST /v1/auth/login`
+- `POST /v1/documents/upload` → `{ "job_id": ... }` (async) · `GET /v1/ingestion-jobs/{job_id}`
+- `GET /v1/documents/{id}` · `DELETE /v1/documents/{id}`
+- `POST /v1/query`
 
-Document endpoints:
-
-- `POST http://127.0.0.1:8000/v1/documents/upload`
-- `GET http://127.0.0.1:8000/v1/documents/{document_id}`
-- `DELETE http://127.0.0.1:8000/v1/documents/{document_id}`
-
-Query endpoint:
-
-- `POST http://127.0.0.1:8000/v1/query`
-
-Example body:
+Example query:
 
 ```json
-{
-  "query": "What is this document about?",
-  "preferred_language": "en",
-  "top_k": 5,
-  "filters": {
-    "language": "en"
-  }
-}
+{ "query": "bharat ki rajdhani kya hai", "top_k": 5 }
 ```
 
-The default query path requires documents to be embedded into ChromaDB first and requires
-`OPENAI_API_KEY` for OpenAI embeddings and answer generation. `/v1/query` requires a bearer
-token; each user only retrieves their own documents.
+The response carries the answer, citations, retrieved chunks, and — when the query was romanized
+Hindi — `transliterated_query` and `transliteration_applied`.
 
-> **Re-index required after upgrading.** Two changes invalidate old vectors: (1) chunk vectors
-> are now scoped by `user_id` (vectors written before this carry none and fail closed), and
-> (2) the default embedding model is now **bge-m3 (1024-dim)** instead of OpenAI (1536-dim) —
-> Chroma rejects a dimension change on an existing collection. Wipe `data/chroma` and re-ingest.
-> Set `EMBEDDING_PROVIDER=openai` to keep the previous embeddings.
+> **Re-index required after upgrading.** Vectors are scoped by `user_id` (older vectors carry
+> none and fail closed), and the default embedding model is **bge-m3 (1024-dim)**, not OpenAI
+> (1536-dim) — Chroma rejects a dimension change on an existing collection. Wipe `data/chroma`
+> and re-ingest, or set `EMBEDDING_PROVIDER=openai` to keep OpenAI embeddings.
+
+## Romanized Hindi queries
+
+`bge-m3` can't retrieve from romanized Hindi — the language signal lives in the script, so a
+Latin-typed query collapses to ~0.20 recall against a native-Devanagari index. The query path
+detects romanized Hindi (distinctly-Hindi function words) and transliterates it to Devanagari
+before embedding, recovering recall to ~0.67 (3.3×) while leaving plain English untouched.
+
+Configured via `TRANSLITERATION_PROVIDER` (`.env`):
+
+- `google` (default) — googletrans; best quality, free, a network call per query, with a local
+  rule-based fallback baked in.
+- `indicxlit` — a local offline neural model (no network).
+- `rule-based` — `indic-transliteration`, instant and offline, lower quality.
+- `llm` — reuse the generation endpoint (costs credits). `off` — disable.
+
+The romanized-Hindi *detector* is also swappable via `TRANSLITERATION_DETECTOR`: `word-list`
+(default — a fast local function-word check, ~98% recall / 0 false-positives) or `muril` (opt-in — a
+frozen `google/muril-base-cased` feature extractor + a small LogisticRegression head trained by
+`scripts/train_romanized_detector.py`; loads lazily on CPU, falls back to the word list on any
+failure).
+
+Kannada/Telugu are wired but off pending their own evaluation corpora. Design details in
+`docs/architecture.md §1.5b`; the motivating spike in `docs/indic-romanized-spike.md`.
 
 ## Evaluation
 
-Fixture mode scores a precomputed JSONL dataset:
-
 ```powershell
+# Fixture mode: score a precomputed JSONL dataset.
 python -m multilingual_rag.evaluation.run data/eval/sample_qa.jsonl --k 2
-```
 
-Live mode runs the real retrieval pipeline (local bge-m3 embeddings + Chroma) over the XQuAD
-corpus in `data/eval/xquad/` — free, no API calls (`sentence-transformers` is a core dependency):
-
-```powershell
+# Live mode: the real pipeline (bge-m3 + Chroma) over the XQuAD corpus — free, no API calls.
 python -m multilingual_rag.evaluation.run --live --langs en zh --k 5
-# --sample N caps distractors/queries per language for a fast smoke run (inflates recall)
+# --sample N caps distractors/queries per language for a fast smoke run (inflates recall).
+
+# Romanized-Hindi eval: native / romanized-raw / transliterated / shipped conditions.
+python scripts/eval_romanized.py --sample 150
+
+# Regenerate the eval corpus (pinned dataset revisions, byte-identical).
+python scripts/build_eval_corpus.py
 ```
 
-Generation-side metrics (citation precision, faithfulness, answer language) arrive with the
-free generation adapter in a later milestone; live mode currently measures retrieval only.
-
-## Docker
+## Docker & smoke test
 
 ```powershell
 docker compose up --build
-```
-
-Run the smoke test against a running API:
-
-```powershell
 python scripts/smoke_test.py --base-url http://127.0.0.1:8000
 ```
+
+## Documentation
+
+- `docs/architecture.md` — HLD/LLD, request flows, known defects.
+- `docs/progress.md` — what's done and what's next.
+- `docs/skills.md` — the technical domains and repo-specific gotchas.
+- `docs/m0/report.md` — the cross-lingual embedding spike (why bge-m3).
+- `docs/indic-romanized-spike.md` — the romanized-Hindi spike.

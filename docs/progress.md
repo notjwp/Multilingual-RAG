@@ -240,7 +240,15 @@ native-Devanagari index. See `docs/indic-romanized-spike.md` for the motivating 
 - ✅ Eval tooling: `hi` added to `build_eval_corpus.py`; `scripts/eval_romanized.py` (romanizer +
   4 conditions). Live-verified through the real `RetrievalService` (bge-m3 + Chroma + google):
   romanized→correct doc, English not transliterated (and still cross-lingual). 109 passed, gates green.
-- **Deferred:** Kannada/Telugu (wired in config/adapters, off — no eval corpus yet).
+- ✅ **Opt-in MuRIL detector** (`TRANSLITERATION_DETECTOR=muril`): a frozen `google/muril-base-cased`
+  feature extractor (`transliteration/muril.py`, pinned) + a LogisticRegression head
+  (`scripts/train_romanized_detector.py`, artifact `data/models/romanized_hi_detector.joblib`, KB-sized,
+  committed). Trained on romanized-hi (pos) vs en+es (neg). **Held-out: MuRIL+LR 1.000 recall / 0.002
+  FP vs word-list 0.983 / 0.000** — recovers the marker-less romanized queries the word list misses,
+  at a tiny precision cost. Default stays **word-list** (fast, no model, hermetic tests); MuRIL loads
+  lazily on CPU only when opted in, with word-list fallback on any failure. 111 passed, gates green.
+- **Deferred:** Kannada/Telugu (wired in config/adapters, off — no eval corpus yet); full MuRIL
+  fine-tune; MuRIL for retrieval (the actual ~0.67 ceiling).
 
 ---
 

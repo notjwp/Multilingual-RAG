@@ -1,6 +1,13 @@
 # Indic Romanized Spike — Hindi
 
-**Status: COMPLETE.**
+**Status: COMPLETE — and now BUILT.** The feature shipped: `RetrievalService` detects romanized
+Hindi and transliterates it to Devanagari before embedding (`src/multilingual_rag/transliteration/`,
+`docs/architecture.md §1.5b`). One correction to the spike's plan below: "adopt a
+transliterate-then-embed step" became **detect-then-transliterate**, not the dual-query it first
+implied — the eval showed searching both the raw and transliterated forms and fusing them loses
+to pure transliteration (the raw search is irreducible noise), so a linguistic detector decides
+*whether* to transliterate instead. Default transliterator is googletrans (the spike's IndicXlit
+is available as the local `indicxlit` option). Measured on XQuAD-hi: romanized recall 0.20 → 0.67.
 
 **Verdict: romanized input is unusable as-is (retention 0.08–0.12); transliterating romanized →
 native script is the fix and recovers most of the gap (retention 0.75). Adopt a
