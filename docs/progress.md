@@ -23,7 +23,7 @@ Phases A, B, C, C4, D all ✅.
 | C4 | Free generation (OpenAI-compatible) | ✅ **DONE** — live NIM query verified, zero OpenAI calls |
 | — | Indic romanized spike (Hindi) | ✅ done — romanized collapses (0.08 retention); transliterate→native recovers to 0.75. **Build it.** See docs/indic-romanized-spike.md |
 | D | Correctness + light scale | ✅ **DONE** — broken DELETE fixed (live), dedup, DB tests, threadpool, no regression |
-| — | Indic query-path feature (build) | ⬜ next — transliterate romanized→native before embed |
+| — | Indic romanized query-path (Hindi) | ✅ **DONE** — detect→transliterate; romanized recall 0.20→0.67 (3.3×), English untouched, live-verified |
 
 ---
 
@@ -216,6 +216,31 @@ over-engineering for one machine). Sequenced tests-first so they exposed the bug
   suite never loads the 2.2 GB model at startup).
 - ✅ Gates green throughout; 87 passed with `RUN_MODEL_TESTS=1`. Eval unchanged (recall@5 0.995 on
   the sample — retrieval untouched). **Deferred:** Chroma server mode, torch-image slimming.
+
+### Indic romanized query-path — Hindi ✅ DONE
+Users can type Hindi in the Latin alphabet (`bharat ki rajdhani kya hai`) and hit the
+native-Devanagari index. See `docs/indic-romanized-spike.md` for the motivating spike.
+- ✅ `Transliterator` **port** + adapters (`transliteration/`): **google** (default — googletrans,
+  best quality, free, network per query, local rule-based fallback baked in), **indicxlit** (local
+  offline neural, `psidharth567/indic-xlit-50M`, pinned; feasibility-proven on Py3.13),
+  **rule-based** (`indic-transliteration`), **llm** (reuses the generation endpoint). Env-driven
+  via `TRANSLITERATION_PROVIDER`.
+- ✅ **Design pivoted on eval evidence.** First built dual-query (search raw + transliterated,
+  fuse). The eval showed *every* fusion (max-cosine, RRF, confidence-routing) dragged Hindi recall
+  *below* pure transliteration (~0.56 vs ~0.67) — the raw search's noise is unavoidable when you
+  can't tell which form is right. Switched to **detection** (`transliteration/detect.py`): a cheap
+  distinctly-Hindi function-word check (`kya`/`hai`/`kaun`/`nahi`, English collisions excluded)
+  decides *whether* to transliterate. Detected → search the transliterated form; plain English →
+  raw, untouched.
+- ✅ Measured (XQuAD-hi, 10k distractors, 150 queries, google, recall@5): native **0.947** ·
+  romanized-raw **0.204** · transliterated **0.676** · **shipped 0.669**. Romanized recovers
+  **0.20 → 0.67 (3.3×)**; detection recall **98.7%**, so shipped ≈ the transliterated ceiling;
+  **0 English false positives**. (Below the spike's 0.747 LLM figure — that was a different corpus
+  cut; the ceiling here is google's transliteration on English-name-heavy XQuAD-hi.)
+- ✅ Eval tooling: `hi` added to `build_eval_corpus.py`; `scripts/eval_romanized.py` (romanizer +
+  4 conditions). Live-verified through the real `RetrievalService` (bge-m3 + Chroma + google):
+  romanized→correct doc, English not transliterated (and still cross-lingual). 109 passed, gates green.
+- **Deferred:** Kannada/Telugu (wired in config/adapters, off — no eval corpus yet).
 
 ---
 

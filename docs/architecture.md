@@ -110,6 +110,33 @@ with `{"$and": [{"user_id": …}, <client filters>]}` (un-widenable), namespaces
 `document_id = uuid5(NAMESPACE_URL, f"{user_id}:{checksum}")` with a `(user_id, checksum)` unique
 constraint, so a user re-uploading identical content updates in place instead of duplicating.
 
+### 1.5b Romanized-Indic query path (detect → transliterate)
+
+bge-m3 can't retrieve from **romanized** Hindi — the language signal lives in the script, so a
+Latin-typed query (`bharat ki rajdhani`) collapses to ~0.20 recall against the native-Devanagari
+index (measured; see `docs/indic-romanized-spike.md`). The fix is a query-side **detect →
+transliterate → search** step in `RetrievalService.retrieve`:
+
+- A `Transliterator` **port** (`transliteration/base.py`) with adapters selected by
+  `transliteration_provider`: **google** (default — googletrans, highest measured quality, free,
+  but a network call per query, with a local rule-based fallback baked in), **indicxlit** (a local
+  offline neural model, `psidharth567/indic-xlit-50M`), **rule-based** (`indic-transliteration`,
+  the zero-dependency floor), **llm** (reuses the generation endpoint). `build_transliterator`
+  is the factory; the query service holds it via the same `app.state` seam as everything else.
+- **Detection, not dual-query.** The first design searched *both* the raw and transliterated
+  forms and fused them, but the eval showed any fusion (max-cosine, RRF, or confidence routing)
+  dragged romanized-Hindi recall *below* pure transliteration (~0.56 vs ~0.70) — the raw search's
+  noise is unavoidable when you can't tell which form is right. So instead
+  `transliteration/detect.py::is_romanized_indic` decides *whether* to transliterate via a cheap
+  linguistic check: distinctly-Hindi function words (`kya`, `hai`, `kaun`, `nahi`, …) that never
+  appear in English. Detected → embed and search the **transliterated** form only; not detected
+  (plain English) → search the raw query untouched, so English stays same-language.
+- Precision is prioritized (a false positive would mis-transliterate a real English query):
+  markers exclude English collisions (`the`, `is`, `to`, `me`), giving 0 English false positives
+  and ~0.83 recall on the hard IAST-strip eval forms (higher on natural typing) in the eval.
+- Native-Devanagari, CJK, and Thai queries have no Latin Hindi markers, so they skip the path
+  (searched as-is). The response carries `transliterated_query` / `transliteration_applied`.
+
 ### 1.6 Tech stack & data stores
 
 - **Python 3.13**, FastAPI, Pydantic v2 (+ pydantic-settings)

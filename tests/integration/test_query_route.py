@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from multilingual_rag.api.app import create_app
 from multilingual_rag.api.routes.query import QueryRequest, QueryResponse, RagQueryService
 from multilingual_rag.core.config import Settings
-from multilingual_rag.core.models import UserRecord
+from multilingual_rag.core.models import GeneratedAnswer, RetrievalContext, UserRecord
 
 
 class FakeQueryService:
@@ -50,6 +50,34 @@ def test_query_route_authenticates_and_passes_user_id() -> None:
     assert request.filters == {"language": "en"}
     # The authenticated user's id must reach the query service.
     assert user_id == "user-1"
+
+
+def test_response_surfaces_transliteration_fields() -> None:
+    # RagQueryService must map RetrievalContext's transliteration transparency into the response.
+    context = RetrievalContext(
+        query="bharat kya hai",
+        query_language="en",
+        results=(),
+        transliterated_query="भारत क्या है",
+        transliteration_applied=True,
+    )
+
+    class _Retrieval:
+        def retrieve(self, *args: object, **kwargs: object) -> RetrievalContext:
+            return context
+
+    class _Gen:
+        def generate_answer(self, *args: object, **kwargs: object) -> GeneratedAnswer:
+            return GeneratedAnswer(answer="ans", language="hi", citations=())
+
+    service = RagQueryService(
+        retrieval_service=_Retrieval(),  # type: ignore[arg-type]
+        answer_generator=_Gen(),  # type: ignore[arg-type]
+    )
+    response = service.answer_query(QueryRequest(query="bharat kya hai"), user_id="user-1")
+
+    assert response.transliteration_applied is True
+    assert response.transliterated_query == "भारत क्या है"
 
 
 def test_query_route_requires_authentication() -> None:

@@ -96,6 +96,10 @@ class RetrievalContext(BaseModel):
     query: str
     query_language: str
     results: tuple[VectorSearchResult, ...]
+    # Set when a romanized query was transliterated to native script and dual-queried, so callers
+    # can see the form that was actually searched. None/False for the ordinary single-query path.
+    transliterated_query: str | None = None
+    transliteration_applied: bool = False
 
 
 class AnswerCitation(BaseModel):

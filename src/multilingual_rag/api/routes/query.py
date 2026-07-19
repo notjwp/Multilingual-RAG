@@ -24,6 +24,7 @@ from multilingual_rag.generation.openai_compatible_generator import (
     OpenAICompatibleAnswerGenerator,
 )
 from multilingual_rag.retrieval.service import RetrievalService
+from multilingual_rag.transliteration.factory import build_transliterator
 from multilingual_rag.vectorstores.base import MetadataValue, VectorFilter
 from multilingual_rag.vectorstores.chroma_store import ChromaVectorStore
 
@@ -73,6 +74,9 @@ class QueryResponse(BaseModel):
     query_language: str
     citations: tuple[CitationResponse, ...]
     retrieved_chunks: tuple[RetrievedChunkResponse, ...]
+    # Present when a romanized query was transliterated and dual-queried (see RetrievalContext).
+    transliterated_query: str | None = None
+    transliteration_applied: bool = False
 
 
 class QueryService(Protocol):
@@ -143,6 +147,7 @@ def get_query_service(request: Request) -> QueryService:
         settings,
         embedding_provider=build_embedding_provider(settings),
         vector_store=vector_store,
+        transliterator=build_transliterator(settings),
     )
     service = RagQueryService(
         retrieval_service=retrieval_service,
@@ -162,6 +167,8 @@ def query_response_from_models(answer: GeneratedAnswer, context: RetrievalContex
         query_language=context.query_language,
         citations=tuple(citation_response(citation) for citation in answer.citations),
         retrieved_chunks=tuple(chunk_response(result) for result in context.results),
+        transliterated_query=context.transliterated_query,
+        transliteration_applied=context.transliteration_applied,
     )
 
 

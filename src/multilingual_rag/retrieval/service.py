@@ -6,6 +6,8 @@ from multilingual_rag.core.config import Settings
 from multilingual_rag.core.models import RetrievalContext
 from multilingual_rag.embeddings.base import EmbeddingProvider
 from multilingual_rag.ingestion.language import LanguageDetector
+from multilingual_rag.transliteration.base import Transliterator
+from multilingual_rag.transliteration.detect import is_romanized_indic
 from multilingual_rag.vectorstores.base import VectorFilter, VectorStore
 
 
@@ -19,11 +21,13 @@ class RetrievalService:
         embedding_provider: EmbeddingProvider,
         vector_store: VectorStore,
         language_detector: LanguageDetector | None = None,
+        transliterator: Transliterator | None = None,
     ) -> None:
         self.settings = settings
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
         self.language_detector = language_detector or LanguageDetector()
+        self.transliterator = transliterator
 
     def retrieve(
         self,
@@ -33,19 +37,44 @@ class RetrievalService:
         top_k: int | None = None,
         filters: VectorFilter | None = None,
     ) -> RetrievalContext:
-        """Retrieve one user's context chunks for a query."""
+        """Retrieve one user's context chunks for a query.
+
+        When the query is detected as **romanized Hindi** (`is_romanized_indic`) and
+        transliteration is enabled, the query is transliterated to native Devanagari and *that*
+        form is embedded and searched — so it matches the native-script index instead of
+        collapsing to noise. A plain English query has no Hindi markers, so it is searched as-is
+        and stays same-language. Detection (a linguistic check) is used rather than routing by
+        retrieval score, which proved unreliable at scale.
+        """
         normalized_query = query.strip()
         query_language = self.language_detector.detect(normalized_query)
-        query_embedding = self.embedding_provider.embed_query(normalized_query)
+        limit = top_k or self.settings.retrieval_top_k
+
+        transliterated_query = self._transliterate(normalized_query)
+        search_text = transliterated_query if transliterated_query is not None else normalized_query
+        embedding = self.embedding_provider.embed_query(search_text)
         results = self.vector_store.search(
-            query_embedding,
-            user_id=user_id,
-            top_k=top_k or self.settings.retrieval_top_k,
-            filters=filters,
+            embedding, user_id=user_id, top_k=limit, filters=filters
         )
+
         return RetrievalContext(
             query=normalized_query,
             query_language=query_language,
             results=results,
+            transliterated_query=transliterated_query,
+            transliteration_applied=transliterated_query is not None,
         )
 
+    def _transliterate(self, query: str) -> str | None:
+        """Return the native-script transliteration to search with, or None to leave the query.
+
+        Skips unless transliteration is enabled and the query is detected as romanized Hindi.
+        Also skips when the transliterator returns the input unchanged (a no-op).
+        """
+        languages = self.settings.transliteration_languages
+        if self.transliterator is None or not is_romanized_indic(query, languages):
+            return None
+        transliterated = self.transliterator.transliterate(query, target_language=languages[0])
+        if not transliterated.strip() or transliterated.strip() == query.strip():
+            return None
+        return transliterated

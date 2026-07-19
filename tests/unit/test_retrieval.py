@@ -52,6 +52,18 @@ class FakeVectorStore:
         raise NotImplementedError
 
 
+class FakeTransliterator:
+    """Returns a preprogrammed native form; records what it was asked to transliterate."""
+
+    def __init__(self, mapping: dict[str, str]) -> None:
+        self.mapping = mapping
+        self.calls: list[tuple[str, str]] = []
+
+    def transliterate(self, text: str, *, target_language: str) -> str:
+        self.calls.append((text, target_language))
+        return self.mapping.get(text, text)
+
+
 def test_retrieval_service_embeds_query_and_scopes_search_to_user() -> None:
     embedding_provider = FakeEmbeddingProvider()
     vector_store = FakeVectorStore()
@@ -68,4 +80,65 @@ def test_retrieval_service_embeds_query_and_scopes_search_to_user() -> None:
     # user_id must reach the vector store — this is the tenancy boundary.
     assert vector_store.search_calls == [([1.0, 0.0], "user-1", 3, {"language": "en"})]
     assert context.results[0].chunk_id == "chunk-1"
+    # No transliterator injected -> single-query path, no transliteration reported.
+    assert context.transliteration_applied is False
+    assert context.transliterated_query is None
+
+
+def test_romanized_hindi_query_searches_the_transliterated_form() -> None:
+    embedding_provider = FakeEmbeddingProvider()
+    vector_store = FakeVectorStore()
+    transliterator = FakeTransliterator({"bharat ki rajdhani kya hai": "भारत की राजधानी क्या है"})
+    service = RetrievalService(
+        Settings(),
+        embedding_provider=embedding_provider,
+        vector_store=vector_store,
+        transliterator=transliterator,
+    )
+
+    context = service.retrieve("bharat ki rajdhani kya hai", user_id="user-1")
+
+    # Detected as romanized Hindi -> transliterated, and the native form is what gets embedded.
+    assert transliterator.calls == [("bharat ki rajdhani kya hai", "hi")]
+    assert embedding_provider.queries == ["भारत की राजधानी क्या है"]  # single search, native form
+    assert context.transliteration_applied is True
+    assert context.transliterated_query == "भारत की राजधानी क्या है"
+    assert context.query == "bharat ki rajdhani kya hai"  # original preserved for display
+
+
+def test_english_query_is_not_transliterated() -> None:
+    embedding_provider = FakeEmbeddingProvider()
+    vector_store = FakeVectorStore()
+    # A real English query has no Hindi markers -> never transliterated (stays same-language).
+    transliterator = FakeTransliterator({"what is the capital of france": "translated"})
+    service = RetrievalService(
+        Settings(),
+        embedding_provider=embedding_provider,
+        vector_store=vector_store,
+        transliterator=transliterator,
+    )
+
+    context = service.retrieve("what is the capital of france", user_id="user-1")
+
+    assert transliterator.calls == []  # detection rejected it before transliterating
+    assert embedding_provider.queries == ["what is the capital of france"]
+    assert context.transliteration_applied is False
+
+
+def test_native_script_query_skips_transliteration() -> None:
+    embedding_provider = FakeEmbeddingProvider()
+    vector_store = FakeVectorStore()
+    transliterator = FakeTransliterator({})  # should never be consulted
+    service = RetrievalService(
+        Settings(),
+        embedding_provider=embedding_provider,
+        vector_store=vector_store,
+        transliterator=transliterator,
+    )
+
+    context = service.retrieve("भारत की राजधानी क्या है", user_id="user-1")
+
+    assert transliterator.calls == []  # native query is not Latin-script
+    assert embedding_provider.queries == ["भारत की राजधानी क्या है"]  # single embed
+    assert context.transliteration_applied is False
 

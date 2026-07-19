@@ -41,6 +41,16 @@ class Settings(BaseSettings):
     # Fail fast instead of blocking on a cold/overloaded model (SDK default is 600s).
     generation_timeout_seconds: float = Field(default=60.0, gt=0)
 
+    # Romanized-Indic query support: detect romanized Hindi and transliterate it to native script
+    # before embedding, so it matches the native-script index (plain English is left untouched).
+    # Default provider is google (googletrans; best quality, free, but a network call per query)
+    # with a local rule-based fallback; indicxlit is the offline neural option.
+    transliteration_enabled: bool = True
+    transliteration_provider: Literal["google", "indicxlit", "rule-based", "llm", "off"] = (
+        "google"
+    )
+    transliteration_languages: tuple[str, ...] = ("hi",)
+
     # Only used when embedding_provider is "openai".
     openai_api_key: SecretStr | None = None
     openai_embedding_model: str = "text-embedding-3-small"

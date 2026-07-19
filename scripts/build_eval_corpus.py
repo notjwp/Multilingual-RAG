@@ -33,7 +33,8 @@ from huggingface_hub import hf_hub_download
 
 # Spanish is the Latin-script control. (German is also present in the corpus repo despite
 # being absent from the dataset card's config list, but es serves the identical role.)
-LANGS = ("en", "es", "zh", "th")
+# Hindi (Devanagari) is the target for the romanized-query eval (docs/indic-romanized-spike.md).
+LANGS = ("en", "es", "zh", "th", "hi")
 N_DISTRACTORS = 20_000
 POOL_SIZE = 100_000  # read this many, then randomly sample N_DISTRACTORS from it
 SEED = 42

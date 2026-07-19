@@ -23,6 +23,10 @@ dependencies = [
   "chromadb>=0.5.23",
   "email-validator>=2.2.0",
   "fastapi>=0.115.6",
+  # Romanized-Indic query transliteration. googletrans (default, unofficial Google Translate
+  # web client — network-dependent) with indic-transliteration (sanscript) as the local fallback.
+  "googletrans>=4.0.2",
+  "indic-transliteration>=2.3.0",
   "langdetect>=1.0.9",
   "openai>=1.59.7",
   "pydantic>=2.10.4",
