@@ -151,12 +151,18 @@ compatible API surfaces.
 - **The design lesson worth internalizing:** the intuitive "search both forms and merge" loses —
   every fusion strategy dragged Hindi recall below pure transliteration because the raw search is
   irreducible noise. Deciding *whether* to transliterate (a linguistic detector) beats hedging.
-- **Detector is swappable** (`TRANSLITERATION_DETECTOR`): a word list (default; ~98%/0-FP, free) or
-  MuRIL — `google/muril-base-cased` used *frozen* as a feature extractor + a LogisticRegression head
-  (`muril.py`, `scripts/train_romanized_detector.py`). MuRIL is the *right* Indic model (trained on
-  transliterated Hindi, unlike bge-m3 or CodeBERT), but for a task the word list nails it's opt-in
-  and lazy, with word-list fallback. Frozen-features + a tiny head beats fine-tuning a 236M model for
-  a binary decision.
+- **Detector is swappable** (`TRANSLITERATION_DETECTOR`): a word list (default; ~98%/0-FP, free,
+  Hindi-only); MuRIL (`google/muril-base-cased` used *frozen* as a feature extractor + a
+  LogisticRegression head, `muril.py`, Hindi-only) — the *right* Indic model (trained on
+  transliterated Hindi, unlike bge-m3 or CodeBERT), opt-in/lazy with word-list fallback; or `google`
+  — googletrans `detect()`, the only path that supports **Kannada/Telugu** (it needs no per-language
+  training data). Detection returns the *target language*, so routing sends each query to the right
+  script. Lesson: when you lack labeled data for a language, a hosted detector beats hand-curating
+  markers you can't read.
+- **No romanized kn/te Q&A corpus exists** (IndicQA-romanized lacks them; FLORES-plus is gated;
+  script-based sets are unloadable in `datasets` 5.x). `scripts/build_indic_romanized_eval.py`
+  synthesizes one from native Wikipedia sentences + the `indic_transliteration` romanizer — the same
+  trick the Hindi eval used. Knowing where free Indic data lives (and doesn't) is half the battle.
 
 **Learn if unfamiliar:** transliteration vs translation, IAST/ITRANS schemes, `googletrans`
 async API, why script (not language) is what dense retrieval keys on.

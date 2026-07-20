@@ -2,10 +2,12 @@
 
 Working reference for where this project stands. Updated as work lands.
 
-**Last updated:** 2026-07-19
+**Last updated:** 2026-07-20
 **Current decision:** Fix-in-place (Phases A–D). Rebuild rejected on evidence.
-**Next action:** commit Phase D (uncommitted), then build the Indic romanized query-path feature.
-Phases A, B, C, C4, D all ✅.
+**Status:** Phases A, B, C, C4, D all ✅. Romanized query-path ✅ — Hindi (default) + opt-in MuRIL
+detector + **Kannada/Telugu (validated, opt-in via the google detector)**.
+**Next candidates (none started):** MuRIL-for-retrieval; local multi-class MuRIL detector (avoid
+per-query network); the two Phase-D deferrals (Chroma server mode, torch-image slimming).
 
 ---
 
@@ -24,6 +26,8 @@ Phases A, B, C, C4, D all ✅.
 | — | Indic romanized spike (Hindi) | ✅ done — romanized collapses (0.08 retention); transliterate→native recovers to 0.75. **Build it.** See docs/indic-romanized-spike.md |
 | D | Correctness + light scale | ✅ **DONE** — broken DELETE fixed (live), dedup, DB tests, threadpool, no regression |
 | — | Indic romanized query-path (Hindi) | ✅ **DONE** — detect→transliterate; romanized recall 0.20→0.67 (3.3×), English untouched, live-verified |
+| — | Opt-in MuRIL detector | ✅ **DONE** — frozen MuRIL + LR head; held-out 1.000/0.002 vs word-list 0.983/0.000; default stays word-list; committed |
+| — | Kannada/Telugu (detect-the-language) | ✅ **DONE** — google `detect()` routes per-language; validated kn 0.588→0.963, te 0.588→0.925, 0% English FP; opt-in |
 
 ---
 
@@ -247,8 +251,27 @@ native-Devanagari index. See `docs/indic-romanized-spike.md` for the motivating 
   FP vs word-list 0.983 / 0.000** — recovers the marker-less romanized queries the word list misses,
   at a tiny precision cost. Default stays **word-list** (fast, no model, hermetic tests); MuRIL loads
   lazily on CPU only when opted in, with word-list fallback on any failure. 111 passed, gates green.
-- **Deferred:** Kannada/Telugu (wired in config/adapters, off — no eval corpus yet); full MuRIL
-  fine-tune; MuRIL for retrieval (the actual ~0.67 ceiling).
+- **Deferred:** full MuRIL fine-tune; MuRIL for retrieval (the actual ~0.67 ceiling).
+
+### Kannada/Telugu — detect-the-language ✅ DONE (opt-in)
+Extends the romanized path to kn/te. googletrans already transliterates them; the gaps were
+detection (hi-only) and routing (fixed to `languages[0]`).
+- ✅ `detect.py`: `detect_target_language(...) -> str|None` (bool `is_romanized_indic` kept as a
+  wrapper). New **`google` detector** (`TRANSLITERATION_DETECTOR=google`) uses googletrans
+  `detect()` to identify hi/kn/te — the only path that supports Kannada/Telugu without per-language
+  training data — with the Hindi word-list as a safety net on failure.
+- ✅ `service.py` routes transliteration to the **detected** language (not `languages[0]`);
+  `TRANSLITERATION_LANGUAGES=hi,kn,te` (comma-parsed) enables them. Transliterators were already
+  kn/te-ready.
+- ✅ Validation: no ready romanized kn/te corpus (IndicQA-romanized lacks them, FLORES-plus gated,
+  script-based sets unloadable), so `scripts/build_indic_romanized_eval.py` synthesizes one from
+  **Wikipedia** (native kn/te sentences) + the `indic_transliteration` romanizer;
+  `eval_romanized.py` generalized to `--lang`. **Measured (self-retrieval, 1800 docs, 80 q):**
+  romanized-raw→transliterated **kn 0.588→0.975, te 0.588→1.000**; shipped **kn 0.963 / te 0.925**
+  (PASS); google detection 93.8% / 87.5%; **0/40 English false-positives**. (Easier eval than hi's
+  XQuAD — proves the mechanism, not a kn/te-beats-hi claim.)
+- ✅ Default unchanged (hi, word-list, no network); kn/te are opt-in. 101 unit tests green
+  (googletrans mocked → hermetic).
 
 ---
 

@@ -7,7 +7,7 @@ from multilingual_rag.core.models import RetrievalContext
 from multilingual_rag.embeddings.base import EmbeddingProvider
 from multilingual_rag.ingestion.language import LanguageDetector
 from multilingual_rag.transliteration.base import Transliterator
-from multilingual_rag.transliteration.detect import is_romanized_indic
+from multilingual_rag.transliteration.detect import detect_target_language
 from multilingual_rag.vectorstores.base import VectorFilter, VectorStore
 
 
@@ -68,16 +68,20 @@ class RetrievalService:
     def _transliterate(self, query: str) -> str | None:
         """Return the native-script transliteration to search with, or None to leave the query.
 
-        Skips unless transliteration is enabled and the query is detected as romanized Hindi.
-        Also skips when the transliterator returns the input unchanged (a no-op).
+        Detects *which* configured Indic language the query is romanized in and transliterates to
+        that script (Hindi with the default detector; hi/kn/te with the ``google`` detector).
+        Skips when nothing is detected or the transliterator returns the input unchanged (a no-op).
         """
-        languages = self.settings.transliteration_languages
-        detector = self.settings.transliteration_detector
-        if self.transliterator is None or not is_romanized_indic(
-            query, languages, detector=detector
-        ):
+        if self.transliterator is None:
             return None
-        transliterated = self.transliterator.transliterate(query, target_language=languages[0])
+        target = detect_target_language(
+            query,
+            self.settings.transliteration_languages,
+            detector=self.settings.transliteration_detector,
+        )
+        if target is None:
+            return None
+        transliterated = self.transliterator.transliterate(query, target_language=target)
         if not transliterated.strip() or transliterated.strip() == query.strip():
             return None
         return transliterated

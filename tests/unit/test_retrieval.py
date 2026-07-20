@@ -1,5 +1,7 @@
 from collections.abc import Sequence
 
+import pytest
+
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.models import VectorSearchResult
 from multilingual_rag.embeddings.base import EmbeddingVector
@@ -141,4 +143,27 @@ def test_native_script_query_skips_transliteration() -> None:
     assert transliterator.calls == []  # native query is not Latin-script
     assert embedding_provider.queries == ["भारत की राजधानी क्या है"]  # single embed
     assert context.transliteration_applied is False
+
+
+def test_google_detector_routes_transliteration_to_detected_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With the google detector, a Kannada-detected query must transliterate to Kannada, not Hindi.
+    from multilingual_rag.transliteration import detect as detect_mod
+
+    monkeypatch.setattr(detect_mod, "_google_detect", lambda text: ("kn", 0.99))
+    embedding_provider = FakeEmbeddingProvider()
+    transliterator = FakeTransliterator({"kannada roman query": "ಕನ್ನಡ ಪ್ರಶ್ನೆ"})
+    service = RetrievalService(
+        Settings(transliteration_detector="google", transliteration_languages=("hi", "kn", "te")),
+        embedding_provider=embedding_provider,
+        vector_store=FakeVectorStore(),
+        transliterator=transliterator,
+    )
+
+    context = service.retrieve("kannada roman query", user_id="user-1")
+
+    assert transliterator.calls == [("kannada roman query", "kn")]  # routed to detected language
+    assert embedding_provider.queries == ["ಕನ್ನಡ ಪ್ರಶ್ನೆ"]  # searched the Kannada form
+    assert context.transliteration_applied is True
 

@@ -15,6 +15,7 @@ high-cosine noise to look confident). Two detectors exist, chosen by ``TRANSLITE
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from functools import lru_cache
@@ -24,6 +25,9 @@ from typing import Any
 from multilingual_rag.transliteration.script import is_latin_script
 
 logger = logging.getLogger(__name__)
+
+# Minimum googletrans language-detection confidence to trust a detected language.
+_DETECT_CONFIDENCE = 0.5
 
 # Repo-root/data/models/... — detect.py is src/multilingual_rag/transliteration/detect.py.
 _ARTIFACT_PATH = (
@@ -106,23 +110,76 @@ def _load_detector() -> _MurilDetector | None:
         return None
 
 
-def is_romanized_indic(
-    text: str, languages: tuple[str, ...], *, detector: str = "word-list"
-) -> bool:
-    """True when ``text`` looks like romanized Hindi that should be transliterated.
+def _google_detect(text: str) -> tuple[str, float] | None:
+    """Detect the language of romanized ``text`` via googletrans → (lang, confidence), or None.
 
-    Only Hindi is implemented; kn/te would need their own detectors. Requires Latin script (a
-    native-Devanagari query is already fine). ``detector`` selects the classifier: ``"word-list"``
-    (default) or ``"muril"`` (opt-in, falls back to the word list on any failure).
+    Google Translate recognizes romanized Indian languages (tested: kn/te at high confidence),
+    which no local list does — this is what makes multi-language (hi/kn/te) detection possible
+    without per-language training data. Network call; returns None on any failure.
     """
-    if "hi" not in languages or not is_latin_script(text):
-        return False
+
+    async def _run() -> Any:
+        import httpx
+        from googletrans import Translator  # type: ignore[import-untyped]
+
+        async with Translator(raise_exception=True, timeout=httpx.Timeout(5.0)) as translator:
+            return await translator.detect(text)
+
+    try:
+        detected = asyncio.run(_run())
+    except Exception:
+        logger.warning("googletrans language detection failed", exc_info=True)
+        return None
+
+    lang, confidence = detected.lang, detected.confidence
+    if isinstance(lang, list):  # googletrans may return lists for ambiguous input
+        lang = lang[0] if lang else None
+    if isinstance(confidence, list):
+        confidence = confidence[0] if confidence else 0.0
+    if not lang:
+        return None
+    return str(lang), float(confidence) if confidence is not None else 0.0
+
+
+def detect_target_language(
+    text: str, languages: tuple[str, ...], *, detector: str = "word-list"
+) -> str | None:
+    """Return which configured Indic language ``text`` is romanized in, or None to skip.
+
+    Requires Latin script (a native-script query is already fine). ``detector``:
+    - ``"word-list"`` / ``"muril"``: Hindi only — return ``"hi"`` or None.
+    - ``"google"``: multi-language — googletrans detects hi/kn/te (the only path that supports
+      Kannada/Telugu); on failure/low-confidence/other-language it falls back to the Hindi word
+      list (a precise net that fires only on real Hindi markers), so English still yields None.
+    """
+    if not is_latin_script(text):
+        return None
+
+    if detector == "google":
+        result = _google_detect(text)
+        if result is not None:
+            lang, confidence = result
+            if lang in languages and confidence >= _DETECT_CONFIDENCE:
+                return lang
+        # Unavailable / unconfident / other-language → Hindi word-list safety net (English → None).
+        return "hi" if ("hi" in languages and _wordlist_match(text)) else None
+
+    # word-list / muril: Hindi only.
+    if "hi" not in languages:
+        return None
     if detector == "muril" and not _state["degraded"]:
         model = _load_detector()
         if model is not None:
             try:
-                return model.predict(text)
+                return "hi" if model.predict(text) else None
             except Exception:
                 logger.warning("MuRIL detection failed; word-list fallback", exc_info=True)
                 _state["degraded"] = True
-    return _wordlist_match(text)
+    return "hi" if _wordlist_match(text) else None
+
+
+def is_romanized_indic(
+    text: str, languages: tuple[str, ...], *, detector: str = "word-list"
+) -> bool:
+    """Backward-compatible boolean wrapper over :func:`detect_target_language`."""
+    return detect_target_language(text, languages, detector=detector) is not None

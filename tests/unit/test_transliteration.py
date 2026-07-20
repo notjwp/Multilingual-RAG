@@ -6,7 +6,7 @@ import pytest
 
 from multilingual_rag.core.config import Settings
 from multilingual_rag.transliteration import detect as detect_mod
-from multilingual_rag.transliteration.detect import is_romanized_indic
+from multilingual_rag.transliteration.detect import detect_target_language, is_romanized_indic
 from multilingual_rag.transliteration.factory import build_transliterator
 from multilingual_rag.transliteration.google import GoogleTransliterator
 from multilingual_rag.transliteration.indicxlit import IndicXlitTransliterator, _clean
@@ -101,6 +101,48 @@ def test_muril_detector_degrades_to_wordlist_on_error(
     assert is_romanized_indic("bharat kya hai", _HI, detector="muril") is True
     assert detect_mod._state["degraded"] is True
     detect_mod._state["degraded"] = False  # don't leak state to other tests
+
+
+# --- google detector: detect-the-language (kn/te), googletrans mocked ------------------------
+
+_HKT = ("hi", "kn", "te")
+
+
+def test_google_detector_routes_to_detected_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Google detects the language; a confident, configured one is returned as the target.
+    for lang in ("hi", "kn", "te"):
+        monkeypatch.setattr(detect_mod, "_google_detect", lambda text, _l=lang: (_l, 0.99))
+        assert detect_target_language("some romanized query", _HKT, detector="google") == lang
+
+
+def test_google_detector_skips_english_and_low_confidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Confident English → not a configured language → the word-list net sees no markers → None.
+    monkeypatch.setattr(detect_mod, "_google_detect", lambda text: ("en", 1.0))
+    assert detect_target_language("what is machine learning", _HKT, detector="google") is None
+    # Low-confidence detection is not trusted → falls through to the word list → None here.
+    monkeypatch.setattr(detect_mod, "_google_detect", lambda text: ("kn", 0.30))
+    assert detect_target_language("what is machine learning", _HKT, detector="google") is None
+
+
+def test_google_detector_ignores_unconfigured_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Kannada detected but only hi is configured → not returned; word-list net → None (no markers).
+    monkeypatch.setattr(detect_mod, "_google_detect", lambda text: ("kn", 0.99))
+    assert detect_target_language("random latin text", ("hi",), detector="google") is None
+
+
+def test_google_detector_falls_back_to_wordlist_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Network failure → None from _google_detect → Hindi word-list safety net.
+    monkeypatch.setattr(detect_mod, "_google_detect", lambda text: None)
+    assert detect_target_language("bharat ki rajdhani kya hai", _HKT, detector="google") == "hi"
+    assert detect_target_language("what is the capital of france", _HKT, detector="google") is None
 
 
 # --- rule-based adapter ----------------------------------------------------------------------

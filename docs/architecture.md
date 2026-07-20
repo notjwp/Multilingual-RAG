@@ -140,8 +140,17 @@ transliterate → search** step in `RetrievalService.retrieve`:
   by catching marker-less romanized queries, but costs a ~950 MB model + a per-query forward pass, so
   it's opt-in; it loads lazily on CPU and **falls back to the word list on any failure** (no artifact,
   no torch, offline), keeping a fresh checkout and the test suite fast and model-free.
-- Native-Devanagari, CJK, and Thai queries have no Latin Hindi markers, so they skip the path
-  (searched as-is). The response carries `transliterated_query` / `transliteration_applied`.
+- **Detection returns the target *language*, not just yes/no** (`detect_target_language -> str|None`),
+  which is what enables **Kannada/Telugu**. The `google` detector (opt-in,
+  `TRANSLITERATION_DETECTOR=google` + `TRANSLITERATION_LANGUAGES=hi,kn,te`) uses googletrans
+  `detect()` to identify hi/kn/te — the only path that needs no per-language training data — and
+  `RetrievalService` transliterates to *that* script. word-list/muril stay Hindi-only. Validated on a
+  Wikipedia-derived synthetic eval (`scripts/build_indic_romanized_eval.py`): kn/te romanized→native
+  recovery 0.588→~0.97, 0 English false-positives. Cost: a network detect call per query, so it's
+  opt-in and the default stays Hindi/word-list.
+- Native-script, CJK, and Thai queries have no Latin markers / detect as their own language, so they
+  skip the path (searched as-is). The response carries `transliterated_query` /
+  `transliteration_applied`.
 
 ### 1.6 Tech stack & data stores
 

@@ -97,14 +97,17 @@ Configured via `TRANSLITERATION_PROVIDER` (`.env`):
 - `rule-based` — `indic-transliteration`, instant and offline, lower quality.
 - `llm` — reuse the generation endpoint (costs credits). `off` — disable.
 
-The romanized-Hindi *detector* is also swappable via `TRANSLITERATION_DETECTOR`: `word-list`
-(default — a fast local function-word check, ~98% recall / 0 false-positives) or `muril` (opt-in — a
-frozen `google/muril-base-cased` feature extractor + a small LogisticRegression head trained by
-`scripts/train_romanized_detector.py`; loads lazily on CPU, falls back to the word list on any
-failure).
+The *detector* is swappable via `TRANSLITERATION_DETECTOR`:
 
-Kannada/Telugu are wired but off pending their own evaluation corpora. Design details in
-`docs/architecture.md §1.5b`; the motivating spike in `docs/indic-romanized-spike.md`.
+- `word-list` (default) — a fast local function-word check, ~98% recall / 0 false-positives. Hindi only.
+- `muril` — a frozen `google/muril-base-cased` feature extractor + a small LogisticRegression head
+  (`scripts/train_romanized_detector.py`); lazy on CPU, word-list fallback. Hindi only.
+- `google` — googletrans `detect()` identifies the language, enabling **Kannada/Telugu**. Set
+  `TRANSLITERATION_LANGUAGES=hi,kn,te`. Validated (Wikipedia-derived eval,
+  `scripts/build_indic_romanized_eval.py`): kn/te romanized→native recovery ~0.59→~0.97, 0 English
+  false-positives. Opt-in — costs a network call per query.
+
+Design details in `docs/architecture.md §1.5b`; the motivating spike in `docs/indic-romanized-spike.md`.
 
 ## Evaluation
 

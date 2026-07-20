@@ -50,11 +50,11 @@ class Settings(BaseSettings):
         "google"
     )
     transliteration_languages: tuple[str, ...] = ("hi",)
-    # How to decide a query is romanized Hindi (whether to transliterate). "word-list" (default) is
-    # a fast local function-word check; "muril" opts into a MuRIL feature + LR classifier (downloads
-    # a ~950 MB model, adds a forward pass per Latin query — no measured accuracy gain over the word
-    # list on the eval, but generalizes better to real-world spelling variants).
-    transliteration_detector: Literal["word-list", "muril"] = "word-list"
+    # How to decide a query is romanized Indic (whether/what to transliterate). "word-list"
+    # (default) and "muril" are Hindi-only. "google" detects the language via Google Translate,
+    # enabling Kannada/Telugu (set transliteration_languages to hi,kn,te) at the cost of a network
+    # call per query. muril downloads a ~950 MB model; see docs/architecture.md §1.5b.
+    transliteration_detector: Literal["word-list", "muril", "google"] = "word-list"
 
     # Only used when embedding_provider is "openai".
     openai_api_key: SecretStr | None = None
@@ -76,6 +76,14 @@ class Settings(BaseSettings):
     chunk_size_tokens: int = Field(default=800, gt=0)
     chunk_overlap_tokens: int = Field(default=120, ge=0)
     retrieval_top_k: int = Field(default=8, gt=0)
+
+    @field_validator("transliteration_languages", mode="before")
+    @classmethod
+    def _split_transliteration_languages(cls, value: object) -> object:
+        """Accept a comma-separated env string (``hi,kn,te``), not just JSON, for convenience."""
+        if isinstance(value, str):
+            return tuple(part.strip() for part in value.split(",") if part.strip())
+        return value
 
     @field_validator("api_prefix")
     @classmethod

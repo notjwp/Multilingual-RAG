@@ -36,20 +36,26 @@ from multilingual_rag.embeddings.bge_embeddings import BgeM3EmbeddingProvider
 from multilingual_rag.evaluation.datasets import load_xquad_corpus
 from multilingual_rag.evaluation.harness import EVAL_USER_ID, ingest_documents
 from multilingual_rag.evaluation.metrics import recall_at_k, reciprocal_rank
-from multilingual_rag.transliteration.detect import is_romanized_indic
+from multilingual_rag.transliteration.detect import detect_target_language
 from multilingual_rag.transliteration.factory import build_transliterator
 
+_ROMANIZE_SCHEME = {
+    "hi": sanscript.DEVANAGARI,
+    "kn": sanscript.KANNADA,
+    "te": sanscript.TELUGU,
+}
 
-def romanize(devanagari: str) -> str:
-    """Devanagari -> diacritic-stripped ASCII romanization (how people actually type).
+
+def romanize(text: str, lang: str = "hi") -> str:
+    """Native Indic script -> diacritic-stripped ASCII romanization (how people actually type).
 
     IAST keeps every phoneme but marks long vowels/retroflexes with diacritics; stripping them
-    (bhārata -> bharata) is deliberately lossy, mirroring real keyboard input.
+    (bhārata -> bharata) is deliberately lossy, mirroring real keyboard input. Works for hi/kn/te.
     """
-    iast = _sanscript(devanagari, sanscript.DEVANAGARI, sanscript.IAST)
+    iast = _sanscript(text, _ROMANIZE_SCHEME[lang], sanscript.IAST)
     decomposed = unicodedata.normalize("NFKD", iast)
-    # Keep ASCII only: drop combining diacritics AND any Devanagari matra sanscript left
-    # untranslated (e.g. the candra-O in foreign loanwords), matching real pure-ASCII typing.
+    # Keep ASCII only: drop combining diacritics AND any native matra sanscript left untranslated,
+    # matching real pure-ASCII typing.
     ascii_only = "".join(
         ch for ch in decomposed if ord(ch) < 128 and not unicodedata.combining(ch)
     )
@@ -61,8 +67,11 @@ def _mean(values: list[float]) -> float:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Romanized-Hindi retrieval evaluation.")
-    parser.add_argument("--xquad-dir", type=Path, default=Path("data/eval/xquad"))
+    parser = argparse.ArgumentParser(description="Romanized-Indic retrieval evaluation.")
+    parser.add_argument("--lang", default="hi", choices=["hi", "kn", "te"])
+    parser.add_argument(
+        "--corpus-dir", "--xquad-dir", dest="corpus_dir", type=Path, default=Path("data/eval/xquad")
+    )
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--sample", type=int, default=150, help="Queries to score (network-bound).")
     parser.add_argument("--distractor-cap", type=int, default=None, help="Cap distractors (speed).")
@@ -75,7 +84,7 @@ def main() -> None:
     parser.add_argument("--pace", type=float, default=0.0, help="Seconds between transliterations.")
     args = parser.parse_args()
 
-    corpus = load_xquad_corpus(args.xquad_dir, ("hi",), sample=args.distractor_cap)
+    corpus = load_xquad_corpus(args.corpus_dir, (args.lang,), sample=args.distractor_cap)
     queries = corpus.queries[: args.sample]
     settings = Settings(environment="test", transliteration_provider=args.provider)
     transliterator = build_transliterator(settings)
@@ -90,8 +99,9 @@ def main() -> None:
         )
         store = ChromaVectorStore(settings)
         n_docs = ingest_documents(store, embedder, corpus.documents)
-        print(f"indexed {n_docs} native-Devanagari docs; scoring {len(queries)} queries "
-              f"(k={args.k}, provider={args.provider})\n")
+        det = settings.transliteration_detector
+        print(f"[{args.lang}] indexed {n_docs} native-script docs; scoring {len(queries)} queries "
+              f"(k={args.k}, provider={args.provider}, detector={det})\n")
 
         def search(text: str) -> tuple[str, ...]:
             embedding = embedder.embed_query(text)
@@ -105,8 +115,8 @@ def main() -> None:
         n_detected = 0
         for i, query in enumerate(queries):
             expected = query.expected_document_ids
-            roman = romanize(query.question)
-            translit = transliterator.transliterate(roman, target_language="hi")
+            roman = romanize(query.question, args.lang)
+            translit = transliterator.transliterate(roman, target_language=args.lang)
             if args.pace:
                 time.sleep(args.pace)
 
@@ -115,10 +125,13 @@ def main() -> None:
                 "romanized-raw": search(roman),
                 "transliterated": search(translit),
             }
-            # The shipped path: transliterate only when detected as romanized Hindi, else search
-            # the raw query untouched (exactly what RetrievalService does in production).
-            detected = is_romanized_indic(
-                roman, ("hi",), detector=settings.transliteration_detector
+            # The shipped path: transliterate only when the detector identifies this language,
+            # else search the raw query untouched (exactly what RetrievalService does).
+            detected = (
+                detect_target_language(
+                    roman, (args.lang,), detector=settings.transliteration_detector
+                )
+                == args.lang
             )
             n_detected += detected
             retrieved["shipped"] = (
@@ -131,7 +144,7 @@ def main() -> None:
             if (i + 1) % 25 == 0:
                 print(f"  ...{i + 1}/{len(queries)}")
 
-    print(f"\nromanized-Hindi detected: {n_detected}/{len(queries)} "
+    print(f"\nromanized-{args.lang} detected: {n_detected}/{len(queries)} "
           f"({n_detected / len(queries):.1%})")
     native_recall = _mean(scores["native"]["recall"]) or 1e-9
     print(f"\n{'condition':<16}{'recall@' + str(args.k):>10}{'MRR':>8}{'retention':>11}")
