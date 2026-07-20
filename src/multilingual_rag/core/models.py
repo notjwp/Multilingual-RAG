@@ -153,3 +153,27 @@ class IngestionJobRecord(BaseModel):
     status: str
     document_id: str | None = None
     error_message: str | None = None
+
+
+class ChatSessionRecord(BaseModel):
+    """A user-owned chat session."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    user_id: str
+    title: str
+    created_at: datetime
+
+
+class MessageRecord(BaseModel):
+    """One persisted chat message (user or assistant), with citations for assistant turns."""
+
+    model_config = ConfigDict(frozen=True)
+
+    message_id: str
+    session_id: str
+    role: str
+    content: str
+    created_at: datetime
+    citations: tuple[AnswerCitation, ...] = ()

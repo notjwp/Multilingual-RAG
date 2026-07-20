@@ -133,7 +133,9 @@ class ChatSession(Base):
     __tablename__ = "chat_sessions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -150,7 +152,7 @@ class Message(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     session_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("chat_sessions.id"),
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
         nullable=False,
     )
     role: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -168,13 +170,16 @@ class MessageCitation(Base):
     __tablename__ = "message_citations"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
-    message_id: Mapped[str] = mapped_column(String(36), ForeignKey("messages.id"), nullable=False)
+    message_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
     document_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
     )
     chunk_id: Mapped[str] = mapped_column(String(128), nullable=False)
     source: Mapped[str] = mapped_column(Text, nullable=False)
     page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class DocumentChunk(Base):

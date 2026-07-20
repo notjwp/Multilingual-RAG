@@ -86,6 +86,10 @@ class QueryService(Protocol):
         """Answer one query request for a user."""
         ...
 
+    def answer(self, query: str, *, user_id: str) -> GeneratedAnswer:
+        """Retrieve context and generate a grounded answer as a domain model (used by chat)."""
+        ...
+
 
 class RagQueryService:
     """Coordinate retrieval and generation for API queries."""
@@ -118,6 +122,15 @@ class RagQueryService:
             preferred_language=request.preferred_language,
         )
         return query_response_from_models(generated_answer, context)
+
+    def answer(
+        self, query: str, *, user_id: str, preferred_language: str | None = None
+    ) -> GeneratedAnswer:
+        """Retrieve context and generate a grounded answer as a domain model (used by chat)."""
+        context = self.retrieval_service.retrieve(query, user_id=user_id)
+        return self.answer_generator.generate_answer(
+            context=context, preferred_language=preferred_language
+        )
 
 
 @router.post("/query", response_model=QueryResponse)

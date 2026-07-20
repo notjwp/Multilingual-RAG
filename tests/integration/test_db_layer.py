@@ -17,18 +17,30 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from multilingual_rag.chat.repository import ChatSessionRepository, MessageRepository
+from multilingual_rag.chat.service import DEFAULT_TITLE, ChatService
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import (
-    DocumentChunk as DomainChunk,
-)
-from multilingual_rag.core.models import (
+    AnswerCitation,
     DocumentMetadata,
     DocumentRecord,
+    GeneratedAnswer,
     IngestionResult,
 )
+from multilingual_rag.core.models import (
+    DocumentChunk as DomainChunk,
+)
 from multilingual_rag.db.base import Base
-from multilingual_rag.db.models import Document, DocumentChunk, DocumentFile, User
+from multilingual_rag.db.models import (
+    ChatSession,
+    Document,
+    DocumentChunk,
+    DocumentFile,
+    Message,
+    MessageCitation,
+    User,
+)
 from multilingual_rag.documents.jobs import run_ingestion_job
 from multilingual_rag.documents.repository import DocumentRepository, IngestionJobRepository
 
@@ -285,3 +297,73 @@ async def test_job_lifecycle(session: AsyncSession) -> None:
     fetched = await jobs.get(user_id="user-1", job_id=job.job_id)
     assert fetched.status == "succeeded"
     assert fetched.document_id == "doc-1"
+
+
+# --- chat sessions & messages (milestone 14) ------------------------------------------------
+
+
+def _citation() -> AnswerCitation:
+    return AnswerCitation(
+        chunk_id="doc-1:0", document_id="doc-1", source="s.txt", page=1, text="snip"
+    )
+
+
+async def test_chat_crud_and_delete_cascade(session: AsyncSession) -> None:
+    await _save(DocumentRepository(session), _record(), user_id="user-1")  # citation FK target
+    sessions = ChatSessionRepository(session)
+    messages = MessageRepository(session)
+
+    chat = await sessions.create(user_id="user-1", title="New chat")
+    await messages.add(session_id=chat.session_id, role="user", content="bharat kya hai")
+    await messages.add(
+        session_id=chat.session_id, role="assistant", content="answer", citations=(_citation(),)
+    )
+    await session.commit()
+
+    assert [c.session_id for c in await sessions.list(user_id="user-1")] == [chat.session_id]
+    renamed = await sessions.rename(user_id="user-1", session_id=chat.session_id, title="Renamed")
+    assert renamed.title == "Renamed"
+    history = await messages.list(session_id=chat.session_id)
+    assert [m.role for m in history] == ["user", "assistant"]
+    assert history[1].citations[0].text == "snip"
+
+    await sessions.delete(user_id="user-1", session_id=chat.session_id)
+    await session.commit()
+    assert (await session.execute(select(ChatSession))).scalars().all() == []
+    assert (await session.execute(select(Message))).scalars().all() == []  # cascade
+    assert (await session.execute(select(MessageCitation))).scalars().all() == []  # cascade
+
+
+async def test_chat_get_is_user_scoped(session: AsyncSession) -> None:
+    chat = await ChatSessionRepository(session).create(user_id="user-1", title="x")
+    await session.commit()
+    with pytest.raises(AppError):
+        await ChatSessionRepository(session).get(user_id="user-2", session_id=chat.session_id)
+
+
+class _FakeAnswerer:
+    def answer(self, query: str, *, user_id: str) -> GeneratedAnswer:
+        return GeneratedAnswer(answer=f"reply: {query}", language="en", citations=(_citation(),))
+
+
+async def test_send_message_persists_turns_and_auto_titles(session: AsyncSession) -> None:
+    await _save(DocumentRepository(session), _record(), user_id="user-1")  # citation FK target
+    service = ChatService(
+        session_repository=ChatSessionRepository(session),
+        message_repository=MessageRepository(session),
+        query_service=_FakeAnswerer(),
+    )
+    chat = await service.create_session(user_id="user-1")
+    assert chat.title == DEFAULT_TITLE
+
+    assistant = await service.send_message(
+        user_id="user-1", session_id=chat.session_id, query="what is bharat"
+    )
+    await session.commit()
+
+    assert assistant.role == "assistant"
+    assert assistant.content == "reply: what is bharat"
+    assert assistant.citations[0].document_id == "doc-1"
+    refreshed, history = await service.get_session(user_id="user-1", session_id=chat.session_id)
+    assert [m.role for m in history] == ["user", "assistant"]
+    assert refreshed.title == "what is bharat"  # auto-titled from the first message
