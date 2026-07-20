@@ -18,10 +18,45 @@ from openai import APITimeoutError, NotFoundError, OpenAI, OpenAIError, RateLimi
 
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
-from multilingual_rag.core.models import AnswerCitation, GeneratedAnswer, RetrievalContext
-from multilingual_rag.generation.citations import parse_cited_results
+from multilingual_rag.core.models import GeneratedAnswer, RetrievalContext
+from multilingual_rag.generation.citations import answer_citations
 from multilingual_rag.generation.language import resolve_answer_language
 from multilingual_rag.generation.prompts import SYSTEM_INSTRUCTIONS, build_answer_prompt
+
+
+def generation_app_error(exc: OpenAIError, model: str) -> AppError:
+    """Map an OpenAI-SDK error to an actionable ``AppError``.
+
+    Shared by the blocking and streaming generators so both surface the same, catalog-aware
+    messages naming ``GENERATION_MODEL`` rather than a bare 502.
+    """
+    if isinstance(exc, RateLimitError):
+        return AppError(
+            "Generation rate limit reached; retry shortly.",
+            code="generation_rate_limited",
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+    if isinstance(exc, APITimeoutError):
+        return AppError(
+            f"Generation model '{model}' did not respond in time. Free-tier models "
+            "can be cold or overloaded — try GENERATION_MODEL=meta/llama-3.1-8b-instruct, "
+            "or raise GENERATION_TIMEOUT_SECONDS.",
+            code="generation_timeout",
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+        )
+    if isinstance(exc, NotFoundError):
+        return AppError(
+            f"Generation model '{model}' is unavailable at this endpoint. Model "
+            "catalogs rotate: pick a current model id from your provider and set "
+            "GENERATION_MODEL (or point GENERATION_BASE_URL elsewhere).",
+            code="generation_model_unavailable",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+        )
+    return AppError(
+        "Answer generation failed.",
+        code="generation_error",
+        status_code=status.HTTP_502_BAD_GATEWAY,
+    )
 
 
 class ChatClient(Protocol):
@@ -92,34 +127,8 @@ class OpenAICompatibleAnswerGenerator:
                 system=SYSTEM_INSTRUCTIONS,
                 prompt=prompt,
             ).strip()
-        except RateLimitError as exc:
-            raise AppError(
-                "Generation rate limit reached; retry shortly.",
-                code="generation_rate_limited",
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            ) from exc
-        except APITimeoutError as exc:
-            raise AppError(
-                f"Generation model '{self.model}' did not respond in time. Free-tier models "
-                "can be cold or overloaded — try GENERATION_MODEL=meta/llama-3.1-8b-instruct, "
-                "or raise GENERATION_TIMEOUT_SECONDS.",
-                code="generation_timeout",
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            ) from exc
-        except NotFoundError as exc:
-            raise AppError(
-                f"Generation model '{self.model}' is unavailable at this endpoint. Model "
-                "catalogs rotate: pick a current model id from your provider and set "
-                "GENERATION_MODEL (or point GENERATION_BASE_URL elsewhere).",
-                code="generation_model_unavailable",
-                status_code=status.HTTP_502_BAD_GATEWAY,
-            ) from exc
         except OpenAIError as exc:
-            raise AppError(
-                "Answer generation failed.",
-                code="generation_error",
-                status_code=status.HTTP_502_BAD_GATEWAY,
-            ) from exc
+            raise generation_app_error(exc, self.model) from exc
 
         if not answer:
             raise AppError(
@@ -131,14 +140,5 @@ class OpenAICompatibleAnswerGenerator:
         return GeneratedAnswer(
             answer=answer,
             language=response_language,
-            citations=tuple(
-                AnswerCitation(
-                    chunk_id=result.chunk_id,
-                    document_id=result.document_id,
-                    source=result.source,
-                    page=result.page,
-                    text=result.text,
-                )
-                for result in parse_cited_results(answer, context.results)
-            ),
+            citations=answer_citations(answer, context.results),
         )

@@ -5,11 +5,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from multilingual_rag import __version__
 from multilingual_rag.api.routes.auth import router as auth_router
 from multilingual_rag.api.routes.chat import router as chat_router
+from multilingual_rag.api.routes.chat_stream import router as chat_stream_router
 from multilingual_rag.api.routes.documents import jobs_router
 from multilingual_rag.api.routes.documents import router as documents_router
 from multilingual_rag.api.routes.health import router as health_router
@@ -36,12 +38,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = app_settings
 
+    # Allow the browser frontend (M16) to call the API and read the SSE stream cross-origin.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(app_settings.cors_allow_origins),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(documents_router)
     app.include_router(jobs_router)
     app.include_router(query_router)
     app.include_router(chat_router)
+    app.include_router(chat_stream_router)
     register_exception_handlers(app)
 
     return app

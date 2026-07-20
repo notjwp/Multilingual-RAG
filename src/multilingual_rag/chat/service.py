@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Protocol
 
+from fastapi import status
+
 from multilingual_rag.chat.repository import ChatSessionRepository, MessageRepository
+from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import ChatSessionRecord, GeneratedAnswer, MessageRecord
+from multilingual_rag.generation.streaming import Done, StreamEvent, Token
 
 DEFAULT_TITLE = "New chat"
 
@@ -19,6 +25,31 @@ class QueryAnswerer(Protocol):
         ...
 
 
+class StreamingAnswerer(Protocol):
+    """The streaming RAG orchestrator — satisfied by ``StreamingAnswerGenerator``."""
+
+    def stream(self, query: str, *, user_id: str) -> AsyncIterator[StreamEvent]:
+        """Retrieve context and stream a grounded answer as ``Token``s then a ``Done``."""
+        ...
+
+
+@dataclass(frozen=True)
+class TokenChunk:
+    """A streamed slice of the assistant's reply, forwarded to the client verbatim."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class CompletedMessage:
+    """The persisted assistant turn, emitted once streaming finishes."""
+
+    message: MessageRecord
+
+
+ChatStreamEvent = TokenChunk | CompletedMessage
+
+
 class ChatService:
     """Create/list/rename/delete chat sessions and answer messages with the RAG pipeline."""
 
@@ -28,10 +59,12 @@ class ChatService:
         session_repository: ChatSessionRepository,
         message_repository: MessageRepository,
         query_service: QueryAnswerer,
+        streaming_answerer: StreamingAnswerer | None = None,
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
         self.query_service = query_service
+        self.streaming_answerer = streaming_answerer
 
     async def create_session(self, *, user_id: str, title: str | None = None) -> ChatSessionRecord:
         return await self.session_repository.create(user_id=user_id, title=title or DEFAULT_TITLE)
@@ -77,6 +110,49 @@ class ChatService:
                 user_id=user_id, session_id=session_id, title=_derive_title(query)
             )
         return assistant
+
+    async def stream_message(
+        self, *, user_id: str, session_id: str, query: str
+    ) -> AsyncIterator[ChatStreamEvent]:
+        """Stream the answer token-by-token, persisting both turns once it completes.
+
+        Forwards each ``Token`` as a ``TokenChunk``; on the final ``Done`` it persists the
+        assistant turn (with citations), auto-titles a fresh session, and yields the persisted
+        message as a ``CompletedMessage``.
+        """
+        if self.streaming_answerer is None:
+            raise AppError(
+                "Streaming is not configured for this chat service.",
+                code="streaming_unavailable",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        session = await self.session_repository.get(user_id=user_id, session_id=session_id)
+        await self.message_repository.add(session_id=session_id, role="user", content=query)
+
+        generated: GeneratedAnswer | None = None
+        async for event in self.streaming_answerer.stream(query, user_id=user_id):
+            if isinstance(event, Token):
+                yield TokenChunk(event.text)
+            elif isinstance(event, Done):
+                generated = event.answer
+        if generated is None:  # the generator raises on an empty answer, so this is defensive
+            raise AppError(
+                "The generation endpoint returned an empty answer.",
+                code="empty_generation_response",
+                status_code=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        assistant = await self.message_repository.add(
+            session_id=session_id,
+            role="assistant",
+            content=generated.answer,
+            citations=generated.citations,
+        )
+        if session.title == DEFAULT_TITLE:
+            await self.session_repository.rename(
+                user_id=user_id, session_id=session_id, title=_derive_title(query)
+            )
+        yield CompletedMessage(assistant)
 
 
 def _derive_title(query: str) -> str:

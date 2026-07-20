@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     api_prefix: str = "/v1"
 
+    # Browser origins allowed to call the API (the M16 frontend + local dev). Accepts a
+    # comma-separated env string (CORS_ALLOW_ORIGINS=http://localhost:3000,https://app.example).
+    cors_allow_origins: tuple[str, ...] = ("http://localhost:3000",)
+
     # Embedding provider: bge-m3 (local, free) is the default; openai stays available.
     embedding_provider: Literal["bge-m3", "openai"] = "bge-m3"
     embedding_device: str | None = None  # bge-m3 torch device; None = auto-select CUDA
@@ -78,9 +82,9 @@ class Settings(BaseSettings):
     chunk_overlap_tokens: int = Field(default=120, ge=0)
     retrieval_top_k: int = Field(default=8, gt=0)
 
-    @field_validator("transliteration_languages", mode="before")
+    @field_validator("transliteration_languages", "cors_allow_origins", mode="before")
     @classmethod
-    def _split_transliteration_languages(cls, value: object) -> object:
+    def _split_comma_separated(cls, value: object) -> object:
         """Accept a comma-separated env string (``hi,kn,te``), not just JSON, for convenience."""
         if isinstance(value, str):
             return tuple(part.strip() for part in value.split(",") if part.strip())
