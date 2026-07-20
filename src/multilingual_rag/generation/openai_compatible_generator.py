@@ -11,6 +11,7 @@ actionable error naming ``GENERATION_MODEL`` rather than a mystery 502.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Protocol, cast
 
 from fastapi import status
@@ -18,10 +19,25 @@ from openai import APITimeoutError, NotFoundError, OpenAI, OpenAIError, RateLimi
 
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
-from multilingual_rag.core.models import GeneratedAnswer, RetrievalContext
+from multilingual_rag.core.models import ConversationTurn, GeneratedAnswer, RetrievalContext
 from multilingual_rag.generation.citations import answer_citations
+from multilingual_rag.generation.contextualize import (
+    CONTEXTUALIZE_SYSTEM,
+    build_contextualize_prompt,
+    clean_standalone_query,
+)
 from multilingual_rag.generation.language import resolve_answer_language
 from multilingual_rag.generation.prompts import SYSTEM_INSTRUCTIONS, build_answer_prompt
+
+
+def build_chat_messages(
+    system: str, prompt: str, history: Sequence[ConversationTurn]
+) -> list[dict[str, str]]:
+    """Assemble the OpenAI ``messages`` array: system, prior turns, then the current user prompt."""
+    messages = [{"role": "system", "content": system}]
+    messages.extend({"role": turn.role, "content": turn.content} for turn in history)
+    messages.append({"role": "user", "content": prompt})
+    return messages
 
 
 def generation_app_error(exc: OpenAIError, model: str) -> AppError:
@@ -60,8 +76,15 @@ def generation_app_error(exc: OpenAIError, model: str) -> AppError:
 
 
 class ChatClient(Protocol):
-    def create_completion(self, *, model: str, system: str, prompt: str) -> str:
-        """Return the assistant's message text for one system+user exchange."""
+    def create_completion(
+        self,
+        *,
+        model: str,
+        system: str,
+        prompt: str,
+        history: Sequence[ConversationTurn] = (),
+    ) -> str:
+        """Return the assistant's message text for a system + history + user exchange."""
         ...
 
 
@@ -71,16 +94,17 @@ class OpenAICompatibleChatClient:
     def __init__(self, api_key: str, base_url: str, timeout: float = 60.0) -> None:
         self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
-    def create_completion(self, *, model: str, system: str, prompt: str) -> str:
+    def create_completion(
+        self,
+        *,
+        model: str,
+        system: str,
+        prompt: str,
+        history: Sequence[ConversationTurn] = (),
+    ) -> str:
         response = self._client.chat.completions.create(
             model=model,
-            messages=cast(
-                Any,
-                [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
-                ],
-            ),
+            messages=cast(Any, build_chat_messages(system, prompt, history)),
         )
         return response.choices[0].message.content or ""
 
@@ -109,13 +133,28 @@ class OpenAICompatibleAnswerGenerator:
                 settings.generation_timeout_seconds,
             )
 
+    def contextualize(self, history: Sequence[ConversationTurn], question: str) -> str:
+        """Rewrite a follow-up into a standalone query for retrieval (identity if no history)."""
+        if not history:
+            return question
+        try:
+            raw = self.client.create_completion(
+                model=self.model,
+                system=CONTEXTUALIZE_SYSTEM,
+                prompt=build_contextualize_prompt(history, question),
+            )
+        except OpenAIError as exc:
+            raise generation_app_error(exc, self.model) from exc
+        return clean_standalone_query(raw, fallback=question)
+
     def generate_answer(
         self,
         *,
         context: RetrievalContext,
         preferred_language: str | None = None,
+        history: Sequence[ConversationTurn] = (),
     ) -> GeneratedAnswer:
-        """Generate an answer grounded in retrieved context."""
+        """Generate an answer grounded in retrieved context, optionally with prior turns."""
         response_language = resolve_answer_language(
             preferred_language, context.query_language, context.results
         )
@@ -126,6 +165,7 @@ class OpenAICompatibleAnswerGenerator:
                 model=self.model,
                 system=SYSTEM_INSTRUCTIONS,
                 prompt=prompt,
+                history=history,
             ).strip()
         except OpenAIError as exc:
             raise generation_app_error(exc, self.model) from exc

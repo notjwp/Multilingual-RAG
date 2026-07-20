@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     chunk_overlap_tokens: int = Field(default=120, ge=0)
     retrieval_top_k: int = Field(default=8, gt=0)
 
+    # Multi-turn chat: how many prior messages to feed the answer model (and the query-rewrite
+    # step) as conversation history. ~5 exchanges. 0 disables history (single-shot per turn).
+    chat_history_max_messages: int = Field(default=10, ge=0)
+
     @field_validator("transliteration_languages", "cors_allow_origins", mode="before")
     @classmethod
     def _split_comma_separated(cls, value: object) -> object:

@@ -155,6 +155,15 @@ class IngestionJobRecord(BaseModel):
     error_message: str | None = None
 
 
+class ConversationTurn(BaseModel):
+    """A prior chat turn (role + content) fed into the generation layer for multi-turn context."""
+
+    model_config = ConfigDict(frozen=True)
+
+    role: str
+    content: str
+
+
 class ChatSessionRecord(BaseModel):
     """A user-owned chat session."""
 

@@ -7,7 +7,7 @@ from pydantic import SecretStr
 
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
-from multilingual_rag.core.models import RetrievalContext, VectorSearchResult
+from multilingual_rag.core.models import ConversationTurn, RetrievalContext, VectorSearchResult
 from multilingual_rag.generation.openai_compatible_generator import (
     OpenAICompatibleAnswerGenerator,
     OpenAICompatibleChatClient,
@@ -46,9 +46,13 @@ class FakeChatClient:
         self.text = text
         self.error = error
         self.calls: list[tuple[str, str, str]] = []
+        self.histories: list[tuple[object, ...]] = []
 
-    def create_completion(self, *, model: str, system: str, prompt: str) -> str:
+    def create_completion(
+        self, *, model: str, system: str, prompt: str, history: object = ()
+    ) -> str:
         self.calls.append((model, system, prompt))
+        self.histories.append(tuple(history))  # type: ignore[arg-type]
         if self.error is not None:
             raise self.error
         return self.text
@@ -129,6 +133,36 @@ def test_empty_answer_is_rejected() -> None:
 def test_requires_key_without_injected_client() -> None:
     with pytest.raises(AppError, match="GENERATION_API_KEY"):
         OpenAICompatibleAnswerGenerator(Settings(environment="test", generation_api_key=None))
+
+
+def test_contextualize_rewrites_follow_up_with_history() -> None:
+    client = FakeChatClient(text='  "Who founded the Zorblax Protocol?"  ')
+    history = (
+        ConversationTurn(role="user", content="Tell me about the Zorblax Protocol"),
+        ConversationTurn(role="assistant", content="It is a fictional standard."),
+    )
+
+    standalone = _generator(client).contextualize(history, "who founded it?")
+
+    assert standalone == "Who founded the Zorblax Protocol?"  # stripped surrounding quotes/space
+    _, system, prompt = client.calls[0]
+    assert "standalone" in system.lower()  # the condense system prompt, not the answer prompt
+    assert "who founded it?" in prompt
+
+
+def test_contextualize_is_identity_and_skips_llm_without_history() -> None:
+    client = FakeChatClient()
+    assert _generator(client).contextualize((), "who founded it?") == "who founded it?"
+    assert client.calls == []  # no condense call on the first turn
+
+
+def test_generate_answer_forwards_history_to_client() -> None:
+    client = FakeChatClient(text="Answer [1]")
+    history = (ConversationTurn(role="user", content="hi"),)
+
+    _generator(client).generate_answer(context=_context(), history=history)
+
+    assert client.histories[-1] == history
 
 
 def test_provider_is_just_a_url_not_a_code_path() -> None:

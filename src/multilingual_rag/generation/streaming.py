@@ -13,7 +13,7 @@ with the blocking generator, so a streamed answer is grounded and cited identica
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -22,10 +22,18 @@ from openai import AsyncOpenAI, OpenAIError
 
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
-from multilingual_rag.core.models import GeneratedAnswer
+from multilingual_rag.core.models import ConversationTurn, GeneratedAnswer
 from multilingual_rag.generation.citations import answer_citations
+from multilingual_rag.generation.contextualize import (
+    CONTEXTUALIZE_SYSTEM,
+    build_contextualize_prompt,
+    clean_standalone_query,
+)
 from multilingual_rag.generation.language import resolve_answer_language
-from multilingual_rag.generation.openai_compatible_generator import generation_app_error
+from multilingual_rag.generation.openai_compatible_generator import (
+    build_chat_messages,
+    generation_app_error,
+)
 from multilingual_rag.generation.prompts import SYSTEM_INSTRUCTIONS, build_answer_prompt
 from multilingual_rag.retrieval.service import RetrievalService
 
@@ -51,9 +59,18 @@ class StreamClient(Protocol):
     """A chat client that streams the assistant's reply as text deltas."""
 
     def astream_completion(
-        self, *, model: str, system: str, prompt: str
+        self,
+        *,
+        model: str,
+        system: str,
+        prompt: str,
+        history: Sequence[ConversationTurn] = (),
     ) -> AsyncIterator[str]:
-        """Yield assistant message deltas for one system+user exchange."""
+        """Yield assistant message deltas for a system + history + user exchange."""
+        ...
+
+    async def acomplete(self, *, model: str, system: str, prompt: str) -> str:
+        """Return a whole (non-streamed) completion — used for the condense/query-rewrite call."""
         ...
 
 
@@ -64,17 +81,16 @@ class OpenAICompatibleStreamClient:
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
     async def astream_completion(
-        self, *, model: str, system: str, prompt: str
+        self,
+        *,
+        model: str,
+        system: str,
+        prompt: str,
+        history: Sequence[ConversationTurn] = (),
     ) -> AsyncIterator[str]:
         stream = await self._client.chat.completions.create(
             model=model,
-            messages=cast(
-                Any,
-                [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
-                ],
-            ),
+            messages=cast(Any, build_chat_messages(system, prompt, history)),
             stream=True,
         )
         async for chunk in stream:
@@ -83,6 +99,13 @@ class OpenAICompatibleStreamClient:
             delta = chunk.choices[0].delta.content
             if delta:
                 yield delta
+
+    async def acomplete(self, *, model: str, system: str, prompt: str) -> str:
+        response = await self._client.chat.completions.create(
+            model=model,
+            messages=cast(Any, build_chat_messages(system, prompt, ())),
+        )
+        return response.choices[0].message.content or ""
 
 
 class StreamingAnswerGenerator:
@@ -113,14 +136,39 @@ class StreamingAnswerGenerator:
             settings.generation_timeout_seconds,
         )
 
+    async def _contextualize(
+        self, history: Sequence[ConversationTurn], question: str
+    ) -> str:
+        """Rewrite a follow-up into a standalone query for retrieval (identity if no history)."""
+        if not history:
+            return question
+        try:
+            raw = await self.client.acomplete(
+                model=self.model,
+                system=CONTEXTUALIZE_SYSTEM,
+                prompt=build_contextualize_prompt(history, question),
+            )
+        except OpenAIError as exc:
+            raise generation_app_error(exc, self.model) from exc
+        return clean_standalone_query(raw, fallback=question)
+
     async def stream(
-        self, query: str, *, user_id: str, preferred_language: str | None = None
+        self,
+        query: str,
+        *,
+        user_id: str,
+        preferred_language: str | None = None,
+        history: Sequence[ConversationTurn] = (),
     ) -> AsyncIterator[StreamEvent]:
-        """Retrieve context, stream the answer tokens, then emit the assembled ``Done``."""
+        """Condense the follow-up, retrieve, stream the answer, then emit the assembled ``Done``."""
+        search_query = await self._contextualize(history, query)
         # Retrieval is the blocking sync core (local bge-m3 embed + Chroma) — offload it.
         context = await asyncio.to_thread(
-            self.retrieval_service.retrieve, query, user_id=user_id
+            self.retrieval_service.retrieve, search_query, user_id=user_id
         )
+        if search_query != query:
+            # Answer the user's actual wording; retrieval used the rewritten standalone query.
+            context = context.model_copy(update={"query": query})
         response_language = resolve_answer_language(
             preferred_language, context.query_language, context.results
         )
@@ -129,7 +177,7 @@ class StreamingAnswerGenerator:
         parts: list[str] = []
         try:
             async for delta in self.client.astream_completion(
-                model=self.model, system=SYSTEM_INSTRUCTIONS, prompt=prompt
+                model=self.model, system=SYSTEM_INSTRUCTIONS, prompt=prompt, history=history
             ):
                 parts.append(delta)
                 yield Token(delta)

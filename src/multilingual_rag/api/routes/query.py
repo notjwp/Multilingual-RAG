@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from typing import Any, Protocol, cast
 
 from fastapi import APIRouter, Depends, Request, status
@@ -13,6 +14,7 @@ from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import (
     AnswerCitation,
+    ConversationTurn,
     GeneratedAnswer,
     RetrievalContext,
     UserRecord,
@@ -86,7 +88,13 @@ class QueryService(Protocol):
         """Answer one query request for a user."""
         ...
 
-    def answer(self, query: str, *, user_id: str) -> GeneratedAnswer:
+    def answer(
+        self,
+        query: str,
+        *,
+        user_id: str,
+        history: Sequence[ConversationTurn] = (),
+    ) -> GeneratedAnswer:
         """Retrieve context and generate a grounded answer as a domain model (used by chat)."""
         ...
 
@@ -124,12 +132,24 @@ class RagQueryService:
         return query_response_from_models(generated_answer, context)
 
     def answer(
-        self, query: str, *, user_id: str, preferred_language: str | None = None
+        self,
+        query: str,
+        *,
+        user_id: str,
+        preferred_language: str | None = None,
+        history: Sequence[ConversationTurn] = (),
     ) -> GeneratedAnswer:
-        """Retrieve context and generate a grounded answer as a domain model (used by chat)."""
-        context = self.retrieval_service.retrieve(query, user_id=user_id)
+        """Retrieve context and generate a grounded answer as a domain model (used by chat).
+
+        With prior turns, first condense the follow-up into a standalone query for retrieval,
+        then answer the user's actual wording with the history in the prompt.
+        """
+        search_query = self.answer_generator.contextualize(history, query)
+        context = self.retrieval_service.retrieve(search_query, user_id=user_id)
+        if search_query != query:
+            context = context.model_copy(update={"query": query})
         return self.answer_generator.generate_answer(
-            context=context, preferred_language=preferred_language
+            context=context, preferred_language=preferred_language, history=history
         )
 
 

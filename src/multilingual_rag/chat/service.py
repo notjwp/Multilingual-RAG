@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -11,24 +11,34 @@ from fastapi import status
 
 from multilingual_rag.chat.repository import ChatSessionRepository, MessageRepository
 from multilingual_rag.core.errors import AppError
-from multilingual_rag.core.models import ChatSessionRecord, GeneratedAnswer, MessageRecord
+from multilingual_rag.core.models import (
+    ChatSessionRecord,
+    ConversationTurn,
+    GeneratedAnswer,
+    MessageRecord,
+)
 from multilingual_rag.generation.streaming import Done, StreamEvent, Token
 
 DEFAULT_TITLE = "New chat"
+DEFAULT_HISTORY_MAX_MESSAGES = 10
 
 
 class QueryAnswerer(Protocol):
     """The RAG orchestrator ChatService needs — satisfied by ``RagQueryService``."""
 
-    def answer(self, query: str, *, user_id: str) -> GeneratedAnswer:
-        """Retrieve context and generate a grounded answer."""
+    def answer(
+        self, query: str, *, user_id: str, history: Sequence[ConversationTurn] = ()
+    ) -> GeneratedAnswer:
+        """Retrieve context and generate a grounded answer, optionally with prior turns."""
         ...
 
 
 class StreamingAnswerer(Protocol):
     """The streaming RAG orchestrator — satisfied by ``StreamingAnswerGenerator``."""
 
-    def stream(self, query: str, *, user_id: str) -> AsyncIterator[StreamEvent]:
+    def stream(
+        self, query: str, *, user_id: str, history: Sequence[ConversationTurn] = ()
+    ) -> AsyncIterator[StreamEvent]:
         """Retrieve context and stream a grounded answer as ``Token``s then a ``Done``."""
         ...
 
@@ -60,11 +70,19 @@ class ChatService:
         message_repository: MessageRepository,
         query_service: QueryAnswerer,
         streaming_answerer: StreamingAnswerer | None = None,
+        history_max_messages: int = DEFAULT_HISTORY_MAX_MESSAGES,
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
         self.query_service = query_service
         self.streaming_answerer = streaming_answerer
+        self.history_max_messages = history_max_messages
+
+    async def _history(self, session_id: str) -> tuple[ConversationTurn, ...]:
+        """The recent prior turns of a session, as conversation context for generation."""
+        prior = await self.message_repository.list(session_id=session_id)
+        recent = prior[-self.history_max_messages :] if self.history_max_messages else ()
+        return tuple(ConversationTurn(role=m.role, content=m.content) for m in recent)
 
     async def create_session(self, *, user_id: str, title: str | None = None) -> ChatSessionRecord:
         return await self.session_repository.create(user_id=user_id, title=title or DEFAULT_TITLE)
@@ -94,10 +112,13 @@ class ChatService:
     ) -> MessageRecord:
         """Persist the user turn, run the RAG pipeline, persist + return the assistant turn."""
         session = await self.session_repository.get(user_id=user_id, session_id=session_id)
+        history = await self._history(session_id)  # prior turns, before this one is stored
         await self.message_repository.add(session_id=session_id, role="user", content=query)
         # The RAG core is sync (local embeddings + a generation HTTP call) — offload it so it
         # doesn't stall the event loop (same as the /v1/query route).
-        answer = await asyncio.to_thread(self.query_service.answer, query, user_id=user_id)
+        answer = await asyncio.to_thread(
+            self.query_service.answer, query, user_id=user_id, history=history
+        )
         assistant = await self.message_repository.add(
             session_id=session_id,
             role="assistant",
@@ -127,10 +148,13 @@ class ChatService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
         session = await self.session_repository.get(user_id=user_id, session_id=session_id)
+        history = await self._history(session_id)  # prior turns, before this one is stored
         await self.message_repository.add(session_id=session_id, role="user", content=query)
 
         generated: GeneratedAnswer | None = None
-        async for event in self.streaming_answerer.stream(query, user_id=user_id):
+        async for event in self.streaming_answerer.stream(
+            query, user_id=user_id, history=history
+        ):
             if isinstance(event, Token):
                 yield TokenChunk(event.text)
             elif isinstance(event, Done):

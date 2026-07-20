@@ -103,11 +103,13 @@ def get_streaming_chat_service(
     if existing_service is not None:
         return cast(StreamingChatServiceProtocol, existing_service)
     query_service = get_query_service(request)
+    settings = cast(Settings, request.app.state.settings)
     return ChatService(
         session_repository=ChatSessionRepository(session),
         message_repository=MessageRepository(session),
         query_service=cast(QueryAnswerer, query_service),
         streaming_answerer=_get_streaming_answerer(request, query_service),
+        history_max_messages=settings.chat_history_max_messages,
     )
 
 

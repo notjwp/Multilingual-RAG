@@ -342,7 +342,13 @@ async def test_chat_get_is_user_scoped(session: AsyncSession) -> None:
 
 
 class _FakeAnswerer:
-    def answer(self, query: str, *, user_id: str) -> GeneratedAnswer:
+    def __init__(self) -> None:
+        self.histories: list[tuple[object, ...]] = []
+
+    def answer(
+        self, query: str, *, user_id: str, history: object = ()
+    ) -> GeneratedAnswer:
+        self.histories.append(tuple(history))  # type: ignore[arg-type]
         return GeneratedAnswer(answer=f"reply: {query}", language="en", citations=(_citation(),))
 
 
@@ -367,3 +373,24 @@ async def test_send_message_persists_turns_and_auto_titles(session: AsyncSession
     refreshed, history = await service.get_session(user_id="user-1", session_id=chat.session_id)
     assert [m.role for m in history] == ["user", "assistant"]
     assert refreshed.title == "what is bharat"  # auto-titled from the first message
+
+
+async def test_send_message_feeds_prior_turns_as_history(session: AsyncSession) -> None:
+    await _save(DocumentRepository(session), _record(), user_id="user-1")  # citation FK target
+    answerer = _FakeAnswerer()
+    service = ChatService(
+        session_repository=ChatSessionRepository(session),
+        message_repository=MessageRepository(session),
+        query_service=answerer,
+    )
+    chat = await service.create_session(user_id="user-1")
+
+    await service.send_message(user_id="user-1", session_id=chat.session_id, query="first q")
+    await service.send_message(user_id="user-1", session_id=chat.session_id, query="second q")
+
+    # Turn 1 has no prior history; turn 2 sees the first user+assistant exchange.
+    assert answerer.histories[0] == ()
+    second = answerer.histories[1]
+    assert [turn.role for turn in second] == ["user", "assistant"]
+    assert second[0].content == "first q"
+    assert second[1].content == "reply: first q"
