@@ -51,9 +51,10 @@ class Settings(BaseSettings):
     )
     transliteration_languages: tuple[str, ...] = ("hi",)
     # How to decide a query is romanized Indic (whether/what to transliterate). "word-list"
-    # (default) and "muril" are Hindi-only. "google" detects the language via Google Translate,
-    # enabling Kannada/Telugu (set transliteration_languages to hi,kn,te) at the cost of a network
-    # call per query. muril downloads a ~950 MB model; see docs/architecture.md §1.5b.
+    # (default) is Hindi-only. "muril" is a local multi-class classifier (hi/kn/te, ~950 MB model,
+    # no network). "google" detects the language via Google Translate (hi/kn/te, a network call per
+    # query). muril or google + transliteration_languages=hi,kn,te enable Kannada/Telugu. See
+    # docs/architecture.md §1.5b.
     transliteration_detector: Literal["word-list", "muril", "google"] = "word-list"
 
     # Only used when embedding_provider is "openai".

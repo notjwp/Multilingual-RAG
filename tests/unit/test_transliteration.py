@@ -93,7 +93,7 @@ def test_muril_detector_degrades_to_wordlist_on_error(
     detect_mod._state["degraded"] = False
 
     class _Boom:
-        def predict(self, text: str) -> bool:
+        def predict_language(self, text: str) -> str | None:
             raise RuntimeError("muril exploded")
 
     monkeypatch.setattr(detect_mod, "_load_detector", lambda: _Boom())
@@ -101,6 +101,30 @@ def test_muril_detector_degrades_to_wordlist_on_error(
     assert is_romanized_indic("bharat kya hai", _HI, detector="muril") is True
     assert detect_mod._state["degraded"] is True
     detect_mod._state["degraded"] = False  # don't leak state to other tests
+
+
+def test_muril_multiclass_routes_to_predicted_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The local multi-class head returns hi/kn/te (or None for "other"); routing honors `languages`.
+    detect_mod._state["degraded"] = False
+
+    class _Head:
+        def __init__(self, lang: str | None) -> None:
+            self._lang = lang
+
+        def predict_language(self, text: str) -> str | None:
+            return self._lang
+
+    for lang in ("hi", "kn", "te"):
+        monkeypatch.setattr(detect_mod, "_load_detector", lambda _l=lang: _Head(_l))
+        assert detect_target_language("q", _HKT, detector="muril") == lang
+
+    # "other" → None; a language not in `languages` → None (don't transliterate to it).
+    monkeypatch.setattr(detect_mod, "_load_detector", lambda: _Head(None))
+    assert detect_target_language("what is machine learning", _HKT, detector="muril") is None
+    monkeypatch.setattr(detect_mod, "_load_detector", lambda: _Head("kn"))
+    assert detect_target_language("q", ("hi",), detector="muril") is None
 
 
 # --- google detector: detect-the-language (kn/te), googletrans mocked ------------------------

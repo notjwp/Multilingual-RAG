@@ -151,14 +151,15 @@ compatible API surfaces.
 - **The design lesson worth internalizing:** the intuitive "search both forms and merge" loses —
   every fusion strategy dragged Hindi recall below pure transliteration because the raw search is
   irreducible noise. Deciding *whether* to transliterate (a linguistic detector) beats hedging.
-- **Detector is swappable** (`TRANSLITERATION_DETECTOR`): a word list (default; ~98%/0-FP, free,
-  Hindi-only); MuRIL (`google/muril-base-cased` used *frozen* as a feature extractor + a
-  LogisticRegression head, `muril.py`, Hindi-only) — the *right* Indic model (trained on
-  transliterated Hindi, unlike bge-m3 or CodeBERT), opt-in/lazy with word-list fallback; or `google`
-  — googletrans `detect()`, the only path that supports **Kannada/Telugu** (it needs no per-language
-  training data). Detection returns the *target language*, so routing sends each query to the right
-  script. Lesson: when you lack labeled data for a language, a hosted detector beats hand-curating
-  markers you can't read.
+- **Detector is swappable** (`TRANSLITERATION_DETECTOR`), and detection returns the *target
+  language* so routing sends each query to the right script: a word list (default; ~98%/0-FP,
+  Hindi-only); **MuRIL multinomial** (`google/muril-base-cased` frozen features + a hi/kn/te/other LR
+  head, `muril.py` — the *right* Indic model, local, no network); or `google` (googletrans `detect()`,
+  hi/kn/te, needs no training data but a network call per query). Two lessons: (1) MuRIL frozen
+  features *do* separate romanized hi/kn/te linearly — a first run showing kn=0.000 was a threshold
+  bug (a 0.5 max-proba floor drops correct 4-class predictions), not the model; always diagnose a
+  suspiciously-bad metric before blaming the approach. (2) For romanized language-ID, char n-grams
+  are a classic, even-lighter alternative that scored comparably here.
 - **No romanized kn/te Q&A corpus exists** (IndicQA-romanized lacks them; FLORES-plus is gated;
   script-based sets are unloadable in `datasets` 5.x). `scripts/build_indic_romanized_eval.py`
   synthesizes one from native Wikipedia sentences + the `indic_transliteration` romanizer — the same

@@ -133,21 +133,22 @@ transliterate → search** step in `RetrievalService.retrieve`:
 - Precision is prioritized (a false positive would mis-transliterate a real English query):
   markers exclude English collisions (`the`, `is`, `to`, `me`), giving 0 English false positives
   and ~0.98 recall on the eval (higher on natural typing).
-- **The detector is swappable** (`TRANSLITERATION_DETECTOR`): `word-list` (default) or `muril` — a
-  frozen `google/muril-base-cased` feature extractor (`transliteration/muril.py`, mean-pooled 768-d)
-  + a committed LogisticRegression head (`scripts/train_romanized_detector.py`, trained on
-  romanized-hi vs en+es). MuRIL edges the word list on held-out recall (1.000 vs 0.983, at 0.002 FP)
-  by catching marker-less romanized queries, but costs a ~950 MB model + a per-query forward pass, so
-  it's opt-in; it loads lazily on CPU and **falls back to the word list on any failure** (no artifact,
-  no torch, offline), keeping a fresh checkout and the test suite fast and model-free.
 - **Detection returns the target *language*, not just yes/no** (`detect_target_language -> str|None`),
-  which is what enables **Kannada/Telugu**. The `google` detector (opt-in,
-  `TRANSLITERATION_DETECTOR=google` + `TRANSLITERATION_LANGUAGES=hi,kn,te`) uses googletrans
-  `detect()` to identify hi/kn/te — the only path that needs no per-language training data — and
-  `RetrievalService` transliterates to *that* script. word-list/muril stay Hindi-only. Validated on a
-  Wikipedia-derived synthetic eval (`scripts/build_indic_romanized_eval.py`): kn/te romanized→native
-  recovery 0.588→~0.97, 0 English false-positives. Cost: a network detect call per query, so it's
-  opt-in and the default stays Hindi/word-list.
+  which is what enables **Kannada/Telugu** — `RetrievalService` transliterates to whichever script is
+  detected. Three detectors (`TRANSLITERATION_DETECTOR`):
+  - `word-list` (default) — a Hindi function-word check, fast/local, no model.
+  - `muril` — a frozen `google/muril-base-cased` feature extractor (`transliteration/muril.py`,
+    mean-pooled 768-d) + a committed **multinomial** LR head (`scripts/train_romanized_detector.py`,
+    `romanized_indic_detector.joblib`) that classifies **hi/kn/te/other**. Local (no network); the
+    only local path to kn/te. Held-out hi 1.0 / kn 0.987 / te 0.920, 0 false-positives.
+  - `google` — googletrans `detect()`; also hi/kn/te, needs no training data, but a network call per
+    query. Same word-list safety net.
+- Both multi-language detectors were validated on a Wikipedia-derived synthetic eval
+  (`scripts/build_indic_romanized_eval.py`): romanized→native recovery **kn 0.96 / te ~0.97**, 0
+  English false-positives. Both are opt-in (a ~950 MB model or a network call); the default stays
+  Hindi/word-list, and every detector **falls back to the word list on failure** — a fresh checkout
+  and the test suite stay fast and model-free. (Char n-grams are an even lighter local alternative
+  that scored comparably; MuRIL was the chosen approach.)
 - Native-script, CJK, and Thai queries have no Latin markers / detect as their own language, so they
   skip the path (searched as-is). The response carries `transliterated_query` /
   `transliteration_applied`.

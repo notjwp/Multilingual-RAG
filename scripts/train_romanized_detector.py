@@ -1,16 +1,18 @@
-"""Train the opt-in MuRIL romanized-Hindi detector (frozen MuRIL features + LogisticRegression).
+"""Train the opt-in MuRIL romanized-Indic detector (frozen MuRIL features + LogisticRegression).
 
-Positives: romanized XQuAD-hi questions (how people type). Negatives: XQuAD en + es questions
-(English *and* Spanish, so the head learns "Latin-script ≠ Hindi", not merely "not English").
-MuRIL is used frozen — only the tiny LR head is trained and committed
-(`data/models/romanized_hi_detector.joblib`). The threshold is tuned for ~0 false positives, to
-match the word-list detector's precision-first stance.
+Multi-class: given a Latin-script query, predict which Indic language it's romanized in — ``hi``,
+``kn``, ``te`` — or ``other`` (English/Spanish/anything non-Indic → don't transliterate). MuRIL is
+used *frozen*; only the tiny multinomial LR head is trained and committed
+(`data/models/romanized_indic_detector.joblib`). This gives the same multi-language detection as the
+``google`` detector but **locally** (no per-query network).
 
-This is a one-off offline step; the runtime detector (`transliteration/detect.py`, opt-in via
-`TRANSLITERATION_DETECTOR=muril`) loads the produced artifact.
+Training data (avoids contaminating the kn/te retrieval eval, which uses the *gold* sentences):
+  hi    — romanized XQuAD-hi questions
+  kn/te — romanized Wikipedia *distractor* sentences (gold is held out for eval_romanized)
+  other — XQuAD en + es questions (Latin-script non-Indic)
 
-Usage:
-    python scripts/train_romanized_detector.py
+A max-probability threshold is tuned so ``other`` almost never routes to an Indic language
+(precision-first). Usage:  python scripts/train_romanized_detector.py
 """
 
 from __future__ import annotations
@@ -30,57 +32,83 @@ from eval_romanized import romanize  # noqa: E402  (sibling script)
 from multilingual_rag.transliteration.detect import is_romanized_indic  # noqa: E402
 from multilingual_rag.transliteration.muril import MurilFeatureExtractor  # noqa: E402
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "eval" / "xquad"
-ARTIFACT = Path(__file__).resolve().parents[1] / "data" / "models" / "romanized_hi_detector.joblib"
+ROOT = Path(__file__).resolve().parents[1]
+XQUAD = ROOT / "data" / "eval" / "xquad"
+INDIC = ROOT / "data" / "eval" / "indic"
+ARTIFACT = ROOT / "data" / "models" / "romanized_indic_detector.joblib"
+INDIC_LANGS = ("hi", "kn", "te")
 SEED = 42
 
 
 def _questions(lang: str) -> list[str]:
-    path = DATA_DIR / f"queries_{lang}.jsonl"
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = (XQUAD / f"queries_{lang}.jsonl").read_text(encoding="utf-8").splitlines()
     return [json.loads(line)["question"] for line in lines if line.strip()]
 
 
+def _distractors(lang: str) -> list[str]:
+    lines = (INDIC / f"distractors_{lang}.jsonl").read_text(encoding="utf-8").splitlines()
+    return [json.loads(line)["text"] for line in lines if line.strip()]
+
+
 def main() -> None:
-    # Labeled data: romanized Hindi (1) vs Latin-script non-Hindi (0).
-    positives = [romanize(q) for q in _questions("hi")]
-    negatives = _questions("en") + _questions("es")
-    texts = positives + negatives
-    labels = np.array([1] * len(positives) + [0] * len(negatives))
-    print(f"positives (romanized-hi): {len(positives)} | negatives (en+es): {len(negatives)}")
+    # Labeled romanized text per class. hi from XQuAD; kn/te from Wikipedia distractors (gold held
+    # out); other = Latin-script non-Indic.
+    samples: list[tuple[str, str]] = []
+    samples += [(romanize(q, "hi"), "hi") for q in _questions("hi")]
+    samples += [(romanize(t, "kn"), "kn") for t in _distractors("kn")]
+    samples += [(romanize(t, "te"), "te") for t in _distractors("te")]
+    samples += [(q, "other") for q in _questions("en") + _questions("es")]
+
+    texts = [text for text, _ in samples]
+    labels = np.array([label for _, label in samples])
+    counts = {lang: int((labels == lang).sum()) for lang in (*INDIC_LANGS, "other")}
+    print("class counts:", counts)
 
     print("embedding with MuRIL (frozen)...")
     features = MurilFeatureExtractor().embed(texts)
-
     x_train, x_test, y_train, y_test, _, text_test = train_test_split(
         features, labels, texts, test_size=0.2, stratify=labels, random_state=SEED
     )
 
-    clf = LogisticRegression(max_iter=1000, class_weight="balanced")
+    clf = LogisticRegression(max_iter=2000, class_weight="balanced")
     clf.fit(x_train, y_train)
+    classes = list(clf.classes_)
+    indic = set(INDIC_LANGS)
 
-    # Tune the threshold on held-out for ~0 false positives (precision-first, like the word list):
-    # any threshold above the highest-scoring negative yields 0 FP.
-    proba = clf.predict_proba(x_test)[:, 1]
-    neg_max = float(proba[y_test == 0].max())
-    threshold = float(np.nextafter(neg_max, 1.0))
-    predicted = proba >= threshold
-    recall = float((predicted[y_test == 1]).mean())
-    fp_rate = float((predicted[y_test == 0]).mean())
+    proba = clf.predict_proba(x_test)
+    argmax = np.array(classes)[proba.argmax(axis=1)]
+    max_proba = proba.max(axis=1)
 
-    # Word-list baseline on the SAME held-out texts.
-    wl = np.array([is_romanized_indic(t, ("hi",), detector="word-list") for t in text_test])
-    wl_recall = float(wl[y_test == 1].mean())
-    wl_fp = float(wl[y_test == 0].mean())
+    # Threshold: keep "other" from routing to an Indic language. The explicit "other" class already
+    # separates non-Indic (0 leakage below), so trust argmax by default (threshold 0.0) — a >0
+    # threshold would wrongly drop correct Indic predictions, whose max-proba is naturally < 0.5 in
+    # a 4-class problem. Only raise it above any "other" sample that leaks to an Indic class.
+    leak = max_proba[(y_test == "other") & np.isin(argmax, list(indic))]
+    threshold = float(np.nextafter(leak.max(), 1.0)) if leak.size else 0.0
 
-    print(f"\n{'detector':<12}{'recall':>10}{'FP':>10}{'threshold':>12}")
-    print("-" * 44)
-    print(f"{'MuRIL+LR':<12}{recall:>10.3f}{fp_rate:>10.3f}{threshold:>12.4f}")
-    print(f"{'word-list':<12}{wl_recall:>10.3f}{wl_fp:>10.3f}{'—':>12}")
+    def predicted_lang(i: int) -> str | None:
+        return argmax[i] if (argmax[i] in indic and max_proba[i] >= threshold) else None
+
+    preds = [predicted_lang(i) for i in range(len(y_test))]
+    print(f"\nthreshold={threshold:.4f}")
+    print(f"{'lang':<8}{'recall (MuRIL)':>16}{'word-list':>12}")
+    print("-" * 36)
+    for lang in INDIC_LANGS:
+        idx = np.where(y_test == lang)[0]
+        recall = float(np.mean([preds[i] == lang for i in idx])) if idx.size else 0.0
+        wl = (
+            float(np.mean([is_romanized_indic(text_test[i], ("hi",), detector="word-list")
+                           for i in idx]))
+            if lang == "hi" and idx.size else float("nan")
+        )
+        print(f"{lang:<8}{recall:>16.3f}{wl:>12.3f}")
+    other_idx = np.where(y_test == "other")[0]
+    indic_fp = float(np.mean([preds[i] in indic for i in other_idx])) if other_idx.size else 0.0
+    print(f"\nother→Indic false-positive rate: {indic_fp:.3f}")
 
     ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump({"clf": clf, "threshold": threshold}, ARTIFACT)
-    print(f"\nsaved head → {ARTIFACT.relative_to(Path.cwd())}")
+    joblib.dump({"clf": clf, "threshold": threshold, "classes": classes}, ARTIFACT)
+    print(f"saved head → {ARTIFACT.relative_to(Path.cwd())}")
 
 
 if __name__ == "__main__":

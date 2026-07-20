@@ -31,8 +31,10 @@ _DETECT_CONFIDENCE = 0.5
 
 # Repo-root/data/models/... — detect.py is src/multilingual_rag/transliteration/detect.py.
 _ARTIFACT_PATH = (
-    Path(__file__).resolve().parents[3] / "data" / "models" / "romanized_hi_detector.joblib"
+    Path(__file__).resolve().parents[3] / "data" / "models" / "romanized_indic_detector.joblib"
 )
+# Languages the MuRIL head can predict (besides "other").
+_INDIC_LANGS = frozenset({"hi", "kn", "te"})
 
 # The MuRIL path self-disables after a failure so it doesn't retry the model on every query.
 _state = {"degraded": False}
@@ -74,17 +76,21 @@ def _wordlist_match(text: str) -> bool:
 
 
 class _MurilDetector:
-    """MuRIL embedding → LogisticRegression head → boolean, at a tuned threshold."""
+    """MuRIL embedding → multinomial LR head → the romanized language, or None."""
 
-    def __init__(self, clf: Any, threshold: float, extractor: Any) -> None:
+    def __init__(self, clf: Any, threshold: float, classes: list[str], extractor: Any) -> None:
         self._clf = clf
         self._threshold = threshold
+        self._classes = classes
         self._extractor = extractor
 
-    def predict(self, text: str) -> bool:
-        vector = self._extractor.embed([text])  # (1, 768)
-        proba = float(self._clf.predict_proba(vector)[0, 1])
-        return proba >= self._threshold
+    def predict_language(self, text: str) -> str | None:
+        proba = self._clf.predict_proba(self._extractor.embed([text]))[0]  # (n_classes,)
+        best = int(proba.argmax())
+        language, confidence = self._classes[best], float(proba[best])
+        if language in _INDIC_LANGS and confidence >= self._threshold:
+            return language
+        return None  # "other", or an Indic guess too weak to trust
 
 
 @lru_cache(maxsize=1)
@@ -104,7 +110,9 @@ def _load_detector() -> _MurilDetector | None:
         # CPU: the detector co-resides with bge-m3 on the query path; a tiny forward pass on CPU
         # avoids competing for a small GPU. Training uses its own (GPU) extractor.
         extractor = MurilFeatureExtractor(device="cpu")
-        return _MurilDetector(payload["clf"], float(payload["threshold"]), extractor)
+        return _MurilDetector(
+            payload["clf"], float(payload["threshold"]), list(payload["classes"]), extractor
+        )
     except Exception:
         logger.warning("MuRIL detector unavailable; using word-list detection", exc_info=True)
         return None
@@ -147,10 +155,11 @@ def detect_target_language(
     """Return which configured Indic language ``text`` is romanized in, or None to skip.
 
     Requires Latin script (a native-script query is already fine). ``detector``:
-    - ``"word-list"`` / ``"muril"``: Hindi only — return ``"hi"`` or None.
-    - ``"google"``: multi-language — googletrans detects hi/kn/te (the only path that supports
-      Kannada/Telugu); on failure/low-confidence/other-language it falls back to the Hindi word
-      list (a precise net that fires only on real Hindi markers), so English still yields None.
+    - ``"word-list"``: Hindi only — return ``"hi"`` or None.
+    - ``"muril"``: local multi-class MuRIL head — returns hi/kn/te (or None for "other"), no
+      network; falls back to the Hindi word list if the model can't load.
+    - ``"google"``: googletrans detects hi/kn/te via a network call; same word-list safety net.
+    Both multi-language detectors only return a language that is also in ``languages``.
     """
     if not is_latin_script(text):
         return None
@@ -164,17 +173,21 @@ def detect_target_language(
         # Unavailable / unconfident / other-language → Hindi word-list safety net (English → None).
         return "hi" if ("hi" in languages and _wordlist_match(text)) else None
 
-    # word-list / muril: Hindi only.
-    if "hi" not in languages:
-        return None
     if detector == "muril" and not _state["degraded"]:
+        # Local multi-class MuRIL head: identifies hi/kn/te (or "other" → None), no network.
         model = _load_detector()
         if model is not None:
             try:
-                return "hi" if model.predict(text) else None
+                detected = model.predict_language(text)
+                return detected if (detected is not None and detected in languages) else None
             except Exception:
                 logger.warning("MuRIL detection failed; word-list fallback", exc_info=True)
                 _state["degraded"] = True
+        return "hi" if ("hi" in languages and _wordlist_match(text)) else None
+
+    # word-list detector (and degraded muril): Hindi only.
+    if "hi" not in languages:
+        return None
     return "hi" if _wordlist_match(text) else None
 
 

@@ -4,10 +4,11 @@ Working reference for where this project stands. Updated as work lands.
 
 **Last updated:** 2026-07-20
 **Current decision:** Fix-in-place (Phases A–D). Rebuild rejected on evidence.
-**Status:** Phases A, B, C, C4, D all ✅. Romanized query-path ✅ — Hindi (default) + opt-in MuRIL
-detector + **Kannada/Telugu (validated, opt-in via the google detector)**.
-**Next candidates (none started):** MuRIL-for-retrieval; local multi-class MuRIL detector (avoid
-per-query network); the two Phase-D deferrals (Chroma server mode, torch-image slimming).
+**Status:** Phases A, B, C, C4, D all ✅. Romanized query-path ✅ — Hindi (default) + opt-in
+Kannada/Telugu via a **local multi-class MuRIL detector** (no per-query network) or the google
+detector.
+**Next candidates (none started):** MuRIL-for-retrieval; the two Phase-D deferrals (Chroma server
+mode, torch-image slimming).
 
 ---
 
@@ -26,8 +27,8 @@ per-query network); the two Phase-D deferrals (Chroma server mode, torch-image s
 | — | Indic romanized spike (Hindi) | ✅ done — romanized collapses (0.08 retention); transliterate→native recovers to 0.75. **Build it.** See docs/indic-romanized-spike.md |
 | D | Correctness + light scale | ✅ **DONE** — broken DELETE fixed (live), dedup, DB tests, threadpool, no regression |
 | — | Indic romanized query-path (Hindi) | ✅ **DONE** — detect→transliterate; romanized recall 0.20→0.67 (3.3×), English untouched, live-verified |
-| — | Opt-in MuRIL detector | ✅ **DONE** — frozen MuRIL + LR head; held-out 1.000/0.002 vs word-list 0.983/0.000; default stays word-list; committed |
-| — | Kannada/Telugu (detect-the-language) | ✅ **DONE** — google `detect()` routes per-language; validated kn 0.588→0.963, te 0.588→0.925, 0% English FP; opt-in |
+| — | Kannada/Telugu (detect-the-language) | ✅ **DONE** — google `detect()` routes per-language; validated kn 0.963, te 0.925, 0% English FP; opt-in |
+| — | Local multi-class MuRIL detector | ✅ **DONE** — frozen MuRIL + multinomial LR (hi/kn/te/other); held-out hi 1.0 / kn 0.987 / te 0.920, 0 FP; shipped kn 0.963 / te 0.975, no per-query network |
 
 ---
 
@@ -246,11 +247,10 @@ native-Devanagari index. See `docs/indic-romanized-spike.md` for the motivating 
   romanized→correct doc, English not transliterated (and still cross-lingual). 109 passed, gates green.
 - ✅ **Opt-in MuRIL detector** (`TRANSLITERATION_DETECTOR=muril`): a frozen `google/muril-base-cased`
   feature extractor (`transliteration/muril.py`, pinned) + a LogisticRegression head
-  (`scripts/train_romanized_detector.py`, artifact `data/models/romanized_hi_detector.joblib`, KB-sized,
-  committed). Trained on romanized-hi (pos) vs en+es (neg). **Held-out: MuRIL+LR 1.000 recall / 0.002
-  FP vs word-list 0.983 / 0.000** — recovers the marker-less romanized queries the word list misses,
-  at a tiny precision cost. Default stays **word-list** (fast, no model, hermetic tests); MuRIL loads
-  lazily on CPU only when opted in, with word-list fallback on any failure. 111 passed, gates green.
+  (`scripts/train_romanized_detector.py`, artifact `data/models/romanized_indic_detector.joblib`,
+  KB-sized, committed). Started as a binary Hindi head; **now multinomial (hi/kn/te/other)** — see the
+  local-multi-class section below. Default stays **word-list** (fast, no model, hermetic tests); MuRIL
+  loads lazily on CPU only when opted in, with word-list fallback on any failure.
 - **Deferred:** full MuRIL fine-tune; MuRIL for retrieval (the actual ~0.67 ceiling).
 
 ### Kannada/Telugu — detect-the-language ✅ DONE (opt-in)
@@ -272,6 +272,25 @@ detection (hi-only) and routing (fixed to `languages[0]`).
   XQuAD — proves the mechanism, not a kn/te-beats-hi claim.)
 - ✅ Default unchanged (hi, word-list, no network); kn/te are opt-in. 101 unit tests green
   (googletrans mocked → hermetic).
+
+### Local multi-class MuRIL detector ✅ DONE (opt-in)
+Removes the google detector's per-query network call for kn/te: the MuRIL head went from binary
+(is-hi) to **multinomial (hi/kn/te/other)**, so `TRANSLITERATION_DETECTOR=muril` now detects all
+three languages *locally*.
+- ✅ `train_romanized_detector.py` retrained multi-class: hi (XQuAD-hi), kn/te (Wikipedia
+  *distractors* romanized — gold held out so the retrieval eval stays honest), other (en+es);
+  multinomial LR on frozen MuRIL features → `data/models/romanized_indic_detector.joblib`
+  (replaces the binary `romanized_hi_detector.joblib`). `detect_target_language(..., detector="muril")`
+  now returns hi/kn/te; `_MurilDetector.predict_language`.
+- ✅ **A debugging catch:** the first run showed kn 0.000 / hi 0.525 — a threshold bug (a 0.5
+  max-proba floor drops correct predictions, whose max-proba is naturally <0.5 in a 4-class problem),
+  *not* the model. The explicit "other" class already gives 0 leakage, so trust argmax (threshold 0).
+  A diagnostic (char-ngram vs MuRIL) confirmed MuRIL separates the languages fine.
+- ✅ **Held-out:** hi 1.000 / kn 0.987 / te 0.920, **0 other→Indic FP**. **Shipped (local detection,
+  no network):** kn 0.963 / te 0.975 (PASS), detection 95% / 90%, 0/40 English FP — matching/beating
+  the google detector. Note: char n-grams are an even-lighter alternative (no ~950 MB model) that
+  scored comparably in the diagnostic; MuRIL was the requested approach.
+- ✅ Default still word-list/hi (no model); muril is opt-in, lazy CPU, word-list fallback.
 
 ---
 
