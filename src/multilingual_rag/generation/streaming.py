@@ -157,14 +157,21 @@ class StreamingAnswerGenerator:
         query: str,
         *,
         user_id: str,
+        session_id: str | None = None,
         preferred_language: str | None = None,
         history: Sequence[ConversationTurn] = (),
     ) -> AsyncIterator[StreamEvent]:
-        """Condense the follow-up, retrieve, stream the answer, then emit the assembled ``Done``."""
+        """Condense the follow-up, retrieve, stream the answer, then emit the assembled ``Done``.
+
+        Retrieval is scoped to the chat's own documents (``session_id``) when given.
+        """
         search_query = await self._contextualize(history, query)
         # Retrieval is the blocking sync core (local bge-m3 embed + Chroma) — offload it.
         context = await asyncio.to_thread(
-            self.retrieval_service.retrieve, search_query, user_id=user_id
+            self.retrieval_service.retrieve,
+            search_query,
+            user_id=user_id,
+            session_id=session_id,
         )
         if search_query != query:
             # Answer the user's actual wording; retrieval used the rewritten standalone query.

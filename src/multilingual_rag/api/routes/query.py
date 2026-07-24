@@ -93,6 +93,7 @@ class QueryService(Protocol):
         query: str,
         *,
         user_id: str,
+        session_id: str | None = None,
         history: Sequence[ConversationTurn] = (),
     ) -> GeneratedAnswer:
         """Retrieve context and generate a grounded answer as a domain model (used by chat)."""
@@ -136,16 +137,21 @@ class RagQueryService:
         query: str,
         *,
         user_id: str,
+        session_id: str | None = None,
         preferred_language: str | None = None,
         history: Sequence[ConversationTurn] = (),
     ) -> GeneratedAnswer:
         """Retrieve context and generate a grounded answer as a domain model (used by chat).
 
-        With prior turns, first condense the follow-up into a standalone query for retrieval,
-        then answer the user's actual wording with the history in the prompt.
+        Retrieval is scoped to the chat's own documents (``session_id``) when given, so a chat
+        only ever answers from what was uploaded into it. With prior turns, first condense the
+        follow-up into a standalone query for retrieval, then answer the user's actual wording
+        with the history in the prompt.
         """
         search_query = self.answer_generator.contextualize(history, query)
-        context = self.retrieval_service.retrieve(search_query, user_id=user_id)
+        context = self.retrieval_service.retrieve(
+            search_query, user_id=user_id, session_id=session_id
+        )
         if search_query != query:
             context = context.model_copy(update={"query": query})
         return self.answer_generator.generate_answer(

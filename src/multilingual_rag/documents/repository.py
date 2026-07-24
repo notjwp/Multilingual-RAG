@@ -32,6 +32,7 @@ class DocumentRepository:
         record: DocumentRecord,
         *,
         user_id: str,
+        session_id: str | None = None,
         file_path: Path,
         filename: str,
         file_size_bytes: int,
@@ -50,6 +51,7 @@ class DocumentRepository:
         document = Document(
             id=record.document.document_id,
             user_id=user_id,
+            session_id=session_id,
             source=record.document.source,
             content_type=record.document.content_type,
             checksum=record.document.checksum,
@@ -96,11 +98,14 @@ class DocumentRepository:
             )
         return document_record_from_orm(document)
 
-    async def list(self, *, user_id: str) -> tuple[DocumentRecord, ...]:
-        """Return all documents for a user."""
-        result = await self.session.execute(
-            select(Document).where(Document.user_id == user_id).order_by(Document.created_at.desc())
-        )
+    async def list(
+        self, *, user_id: str, session_id: str | None = None
+    ) -> tuple[DocumentRecord, ...]:
+        """Return a user's documents, narrowed to one chat when ``session_id`` is given."""
+        query = select(Document).where(Document.user_id == user_id)
+        if session_id is not None:
+            query = query.where(Document.session_id == session_id)
+        result = await self.session.execute(query.order_by(Document.created_at.desc()))
         return tuple(document_record_from_orm(document) for document in result.scalars().all())
 
     async def delete(self, *, user_id: str, document_id: str) -> DocumentRecord:
@@ -119,9 +124,16 @@ class IngestionJobRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create(self, *, user_id: str, file_path: Path) -> IngestionJobRecord:
-        """Create a queued ingestion job."""
-        job = IngestionJob(user_id=user_id, file_path=str(file_path), status=IngestionStatus.QUEUED)
+    async def create(
+        self, *, user_id: str, session_id: str | None = None, file_path: Path
+    ) -> IngestionJobRecord:
+        """Create a queued ingestion job, scoped to a chat when ``session_id`` is given."""
+        job = IngestionJob(
+            user_id=user_id,
+            session_id=session_id,
+            file_path=str(file_path),
+            status=IngestionStatus.QUEUED,
+        )
         self.session.add(job)
         await self.session.flush()
         return ingestion_job_record_from_orm(job)

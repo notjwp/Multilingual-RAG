@@ -30,26 +30,30 @@ class DatabaseDocumentIndexingService:
         self.job_repository = job_repository
         self.vector_store = vector_store
 
-    async def create_ingestion_job(self, *, user_id: str, path: Path) -> IngestionJobRecord:
-        """Create an ingestion job for a saved uploaded file."""
-        return await self.job_repository.create(user_id=user_id, file_path=path)
+    async def create_ingestion_job(
+        self, *, user_id: str, session_id: str | None = None, path: Path
+    ) -> IngestionJobRecord:
+        """Create an ingestion job for a saved uploaded file, scoped to a chat."""
+        return await self.job_repository.create(
+            user_id=user_id, session_id=session_id, file_path=path
+        )
 
     async def get_ingestion_job(self, *, user_id: str, job_id: str) -> IngestionJobRecord:
         """Return a user-scoped ingestion job."""
         return await self.job_repository.get(user_id=user_id, job_id=job_id)
 
-    async def list_documents(self, *, user_id: str) -> tuple[DocumentRecord, ...]:
-        """Return all documents for a user."""
-        return await self.document_repository.list(user_id=user_id)
+    async def list_documents(
+        self, *, user_id: str, session_id: str | None = None
+    ) -> tuple[DocumentRecord, ...]:
+        """Return a user's documents, narrowed to one chat when ``session_id`` is given."""
+        return await self.document_repository.list(user_id=user_id, session_id=session_id)
 
-    async def get_document(self, *, user_id: str, document_id: str) -> DocumentRecord:
-        """Return stored metadata for one indexed document."""
-        return await self.document_repository.get(user_id=user_id, document_id=document_id)
-
-    async def delete_document(self, *, user_id: str, document_id: str) -> DocumentRecord:
-        """Delete one indexed document from metadata and vector stores."""
+    async def delete_document(
+        self, *, user_id: str, document_id: str, session_id: str | None = None
+    ) -> DocumentRecord:
+        """Delete one indexed document from metadata and the chat-scoped vector store."""
         record = await self.document_repository.delete(user_id=user_id, document_id=document_id)
-        self.vector_store.delete_document(document_id, user_id=user_id)
+        self.vector_store.delete_document(document_id, user_id=user_id, session_id=session_id)
         return record
 
 

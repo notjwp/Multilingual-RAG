@@ -54,6 +54,48 @@ def test_search_is_user_scoped(tmp_path: Path) -> None:
     assert [r.text for r in results] == ["u1 doc"]  # never another user's chunk
 
 
+def test_search_is_chat_scoped(tmp_path: Path) -> None:
+    """M18: a chat only ever sees its own documents, never another chat's (same user)."""
+    store = _store(tmp_path)
+    store.upsert_chunks(
+        [_chunk("d:0", text="chat A doc")], [[1.0, 0.0, 0.0, 0.0]], user_id="u1", session_id="a"
+    )
+    store.upsert_chunks(
+        [_chunk("d:0", text="chat B doc")], [[1.0, 0.0, 0.0, 0.0]], user_id="u1", session_id="b"
+    )
+
+    a = store.search([1.0, 0.0, 0.0, 0.0], user_id="u1", session_id="a", top_k=5)
+    b = store.search([1.0, 0.0, 0.0, 0.0], user_id="u1", session_id="b", top_k=5)
+    # A user-wide search (no session) sees neither chat's docs — they live in per-chat indexes.
+    wide = store.search([1.0, 0.0, 0.0, 0.0], user_id="u1", top_k=5)
+
+    assert [r.text for r in a] == ["chat A doc"]
+    assert [r.text for r in b] == ["chat B doc"]
+    assert wide == ()
+
+
+def test_delete_document_is_chat_scoped(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.upsert_chunks(
+        [_chunk("a:0", document_id="a", text="A")],
+        [[1.0, 0.0, 0.0, 0.0]],
+        user_id="u1",
+        session_id="chat-a",
+    )
+    store.upsert_chunks(
+        [_chunk("a:0", document_id="a", text="B")],
+        [[1.0, 0.0, 0.0, 0.0]],
+        user_id="u1",
+        session_id="chat-b",
+    )
+
+    store.delete_document("a", user_id="u1", session_id="chat-a")
+
+    assert store.search([1.0, 0.0, 0.0, 0.0], user_id="u1", session_id="chat-a", top_k=5) == ()
+    survived = store.search([1.0, 0.0, 0.0, 0.0], user_id="u1", session_id="chat-b", top_k=5)
+    assert [r.text for r in survived] == ["B"]  # the other chat's identical-id doc is untouched
+
+
 def test_delete_document_removes_only_that_document(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.upsert_chunks(

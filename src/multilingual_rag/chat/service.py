@@ -27,7 +27,12 @@ class QueryAnswerer(Protocol):
     """The RAG orchestrator ChatService needs — satisfied by ``RagQueryService``."""
 
     def answer(
-        self, query: str, *, user_id: str, history: Sequence[ConversationTurn] = ()
+        self,
+        query: str,
+        *,
+        user_id: str,
+        session_id: str | None = None,
+        history: Sequence[ConversationTurn] = (),
     ) -> GeneratedAnswer:
         """Retrieve context and generate a grounded answer, optionally with prior turns."""
         ...
@@ -37,7 +42,12 @@ class StreamingAnswerer(Protocol):
     """The streaming RAG orchestrator — satisfied by ``StreamingAnswerGenerator``."""
 
     def stream(
-        self, query: str, *, user_id: str, history: Sequence[ConversationTurn] = ()
+        self,
+        query: str,
+        *,
+        user_id: str,
+        session_id: str | None = None,
+        history: Sequence[ConversationTurn] = (),
     ) -> AsyncIterator[StreamEvent]:
         """Retrieve context and stream a grounded answer as ``Token``s then a ``Done``."""
         ...
@@ -117,7 +127,11 @@ class ChatService:
         # The RAG core is sync (local embeddings + a generation HTTP call) — offload it so it
         # doesn't stall the event loop (same as the /v1/query route).
         answer = await asyncio.to_thread(
-            self.query_service.answer, query, user_id=user_id, history=history
+            self.query_service.answer,
+            query,
+            user_id=user_id,
+            session_id=session_id,
+            history=history,
         )
         assistant = await self.message_repository.add(
             session_id=session_id,
@@ -153,7 +167,7 @@ class ChatService:
 
         generated: GeneratedAnswer | None = None
         async for event in self.streaming_answerer.stream(
-            query, user_id=user_id, history=history
+            query, user_id=user_id, session_id=session_id, history=history
         ):
             if isinstance(event, Token):
                 yield TokenChunk(event.text)

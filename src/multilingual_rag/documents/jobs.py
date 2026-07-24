@@ -61,6 +61,7 @@ async def run_ingestion_job(
     # Capture into locals before any rollback — a rolled-back ORM object can't be read
     # (async lazy-load fails), and the failure-cleanup path needs these.
     user_id = job.user_id
+    session_id = job.session_id  # the chat this document is scoped to (M18), or None
     file_path = Path(job.file_path)
 
     await job_repository.mark_running(job_id)
@@ -69,7 +70,9 @@ async def run_ingestion_job(
     # Set once the document id is known, so failure cleanup can remove any vectors written.
     document_id: str | None = None
     try:
-        ingestion_result = ingestion_service.ingest_file(file_path, user_id=user_id)
+        ingestion_result = ingestion_service.ingest_file(
+            file_path, user_id=user_id, session_id=session_id
+        )
         document_id = ingestion_result.document.document_id
         embeddings = embedding_provider.embed_documents(
             tuple(chunk.text for chunk in ingestion_result.chunks)
@@ -82,12 +85,15 @@ async def run_ingestion_job(
         await DocumentRepository(session).save(
             record,
             user_id=user_id,
+            session_id=session_id,
             file_path=file_path,
             filename=file_path.name,
             file_size_bytes=file_path.stat().st_size,
             chunk_metadata=_chunk_metadata(ingestion_result.chunks),
         )
-        vector_store.upsert_chunks(ingestion_result.chunks, embeddings, user_id=user_id)
+        vector_store.upsert_chunks(
+            ingestion_result.chunks, embeddings, user_id=user_id, session_id=session_id
+        )
         await job_repository.mark_succeeded(job_id=job_id, document_id=document_id)
         await session.commit()
         return document_id
@@ -96,7 +102,7 @@ async def run_ingestion_job(
         if document_id is not None:
             # Best-effort: drop any vectors that landed, so a failed job leaves nothing behind.
             with contextlib.suppress(Exception):
-                vector_store.delete_document(document_id, user_id=user_id)
+                vector_store.delete_document(document_id, user_id=user_id, session_id=session_id)
         await job_repository.mark_failed(job_id=job_id, error_message=str(exc))
         await session.commit()
         raise

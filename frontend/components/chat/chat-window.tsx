@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { ChatFiles } from "@/components/chat/chat-files";
 import { Composer } from "@/components/chat/composer";
 import { MessageBubble, type UiMessage } from "@/components/chat/message-bubble";
 import { Button } from "@/components/ui/button";
@@ -137,6 +138,9 @@ export function ChatWindow({ chatId }: { chatId: string }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex items-center justify-end border-b px-4 py-2">
+        <ChatFiles chatId={chatId} />
+      </div>
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         <div className="mx-auto flex max-w-3xl flex-col gap-4 px-4 py-6">
           {loading ? (
@@ -149,7 +153,8 @@ export function ChatWindow({ chatId }: { chatId: string }) {
             <div className="flex flex-col items-center gap-1 py-16 text-center">
               <p className="text-base font-medium">Ask anything</p>
               <p className="text-sm text-muted-foreground">
-                Answers are grounded in your uploaded documents, with citations.
+                Upload files with <span className="font-medium">Files</span> to ground this
+                chat&apos;s answers, with citations.
               </p>
             </div>
           ) : (

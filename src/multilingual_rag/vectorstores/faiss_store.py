@@ -1,15 +1,16 @@
-"""Local FAISS vector store: a per-user index file + a JSON metadata sidecar.
+"""Local FAISS vector store: a per-scope index file + a JSON metadata sidecar.
 
 FAISS is an in-process library, not a server, so this adapter avoids embedded-Chroma's
 multi-process pitfall (a long-lived client that can't see another process's writes) by holding no
-shared live state: every operation loads the user's current index file — cached by ``mtime`` and
+shared live state: every operation loads the scope's current index file — cached by ``mtime`` and
 reloaded when the worker rewrites it — and writes are atomic (temp + ``os.replace``) under a
 cross-process ``FileLock``. So "worker writes → API reads" just works.
 
 FAISS stores only vectors + int64 ids, so a sidecar JSON file holds each chunk's text and metadata.
 Vectors are compared by inner product on the already-normalized bge-m3 embeddings, i.e. cosine
-similarity — so ``score`` matches the Chroma adapter's semantics. Indexes are per-user, which makes
-user scoping leak-proof and keeps each index small.
+similarity — so ``score`` matches the Chroma adapter's semantics. Indexes are per **scope** — a
+user, or a ``(user, chat)`` pair when a ``session_id`` is given (M18 per-chat documents) — which
+makes both user and chat scoping leak-proof by construction and keeps each index small.
 """
 
 from __future__ import annotations
@@ -62,6 +63,7 @@ class FaissVectorStore:
         embeddings: Sequence[EmbeddingVector],
         *,
         user_id: str,
+        session_id: str | None = None,
     ) -> None:
         if not chunks:
             raise AppError(
@@ -75,21 +77,23 @@ class FaissVectorStore:
                 code="vector_upsert_size_mismatch",
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
-        with self._file_lock(user_id):
-            state = self._load(user_id)
+        scope = self._scope(user_id, session_id)
+        with self._file_lock(scope):
+            state = self._load(scope)
             ids = np.array([_chunk_int_id(c.chunk_id) for c in chunks], dtype=np.int64)
             state.index.remove_ids(ids)  # replace semantics; ignores ids not present
             vectors = _to_matrix([list(e) for e in embeddings])
             state.index.add_with_ids(vectors, ids)
             for chunk, int_id in zip(chunks, ids, strict=True):
                 state.meta[str(int(int_id))] = _meta_for_chunk(chunk)
-            self._persist(user_id, state)
+            self._persist(scope, state)
 
     def search(
         self,
         query_embedding: EmbeddingVector,
         *,
         user_id: str,
+        session_id: str | None = None,
         top_k: int,
         filters: VectorFilter | None = None,
     ) -> tuple[VectorSearchResult, ...]:
@@ -105,7 +109,7 @@ class FaissVectorStore:
                 code="invalid_top_k",
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
-        state = self._load(user_id)
+        state = self._load(self._scope(user_id, session_id))
         if state.index.ntotal == 0:
             return ()
         query = _to_matrix([list(query_embedding)])
@@ -125,15 +129,18 @@ class FaissVectorStore:
                 break
         return tuple(results)
 
-    def delete_document(self, document_id: str, *, user_id: str) -> None:
+    def delete_document(
+        self, document_id: str, *, user_id: str, session_id: str | None = None
+    ) -> None:
         if not document_id.strip():
             raise AppError(
                 "document_id is required.",
                 code="missing_document_id",
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
-        with self._file_lock(user_id):
-            state = self._load(user_id)
+        scope = self._scope(user_id, session_id)
+        with self._file_lock(scope):
+            state = self._load(scope)
             remove = [
                 int(key)
                 for key, item in state.meta.items()
@@ -147,24 +154,30 @@ class FaissVectorStore:
                 for key, item in state.meta.items()
                 if item.get("document_id") != document_id
             }
-            self._persist(user_id, state)
+            self._persist(scope, state)
 
-    # --- paths / locks ---
-    def _index_path(self, user_id: str) -> Path:
-        return self._dir / f"{_safe(user_id)}.faiss"
+    # --- scope / paths / locks ---
+    def _scope(self, user_id: str, session_id: str | None) -> str:
+        """One index file per user, or per ``(user, chat)`` when a session is given (M18)."""
+        if session_id is None:
+            return _safe(user_id)
+        return f"{_safe(user_id)}__{_safe(session_id)}"
 
-    def _meta_path(self, user_id: str) -> Path:
-        return self._dir / f"{_safe(user_id)}.meta.json"
+    def _index_path(self, scope: str) -> Path:
+        return self._dir / f"{scope}.faiss"
 
-    def _file_lock(self, user_id: str) -> FileLock:
-        return FileLock(str(self._dir / f"{_safe(user_id)}.lock"))
+    def _meta_path(self, scope: str) -> Path:
+        return self._dir / f"{scope}.meta.json"
+
+    def _file_lock(self, scope: str) -> FileLock:
+        return FileLock(str(self._dir / f"{scope}.lock"))
 
     # --- load / persist ---
-    def _load(self, user_id: str) -> _UserIndex:
-        index_path = self._index_path(user_id)
+    def _load(self, scope: str) -> _UserIndex:
+        index_path = self._index_path(scope)
         mtime = index_path.stat().st_mtime if index_path.exists() else None
         with self._cache_lock:
-            cached = self._cache.get(user_id)
+            cached = self._cache.get(scope)
             if cached is not None and cached.mtime == mtime:
                 return cached
 
@@ -172,21 +185,21 @@ class FaissVectorStore:
             state = _UserIndex(_new_index(self._dim), {}, None)
         else:
             index = faiss.read_index(str(index_path))
-            meta_path = self._meta_path(user_id)
+            meta_path = self._meta_path(scope)
             meta = json.loads(meta_path.read_text("utf-8")) if meta_path.exists() else {}
             state = _UserIndex(index, meta, mtime)
 
         with self._cache_lock:
-            self._cache[user_id] = state
+            self._cache[scope] = state
         return state
 
-    def _persist(self, user_id: str, state: _UserIndex) -> None:
-        index_path = self._index_path(user_id)
+    def _persist(self, scope: str, state: _UserIndex) -> None:
+        index_path = self._index_path(scope)
         _atomic_write_index(index_path, state.index)
-        _atomic_write_text(self._meta_path(user_id), json.dumps(state.meta))
+        _atomic_write_text(self._meta_path(scope), json.dumps(state.meta))
         state.mtime = index_path.stat().st_mtime
         with self._cache_lock:
-            self._cache[user_id] = state
+            self._cache[scope] = state
 
 
 def _new_index(dimension: int) -> Any:

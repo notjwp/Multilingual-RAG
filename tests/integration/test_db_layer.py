@@ -188,6 +188,48 @@ async def test_document_file_stores_content_checksum_not_path(session: AsyncSess
     assert df.checksum == "the-real-content-hash"
 
 
+async def test_documents_are_chat_scoped_and_cascade_on_chat_delete(
+    session: AsyncSession,
+) -> None:
+    """M18: documents are chat-scoped; listing is per-chat; deleting a chat drops its docs."""
+    sessions = ChatSessionRepository(session)
+    chat_a = await sessions.create(user_id="user-1", title="A")
+    chat_b = await sessions.create(user_id="user-1", title="B")
+    repo = DocumentRepository(session)
+    await repo.save(
+        _record(document_id="doc-a", checksum="ck-a"),
+        user_id="user-1",
+        session_id=chat_a.session_id,
+        file_path=Path("a.txt"),
+        filename="a.txt",
+        file_size_bytes=1,
+        chunk_metadata=_chunk_meta("doc-a"),
+    )
+    await repo.save(
+        _record(document_id="doc-b", checksum="ck-b"),
+        user_id="user-1",
+        session_id=chat_b.session_id,
+        file_path=Path("b.txt"),
+        filename="b.txt",
+        file_size_bytes=1,
+        chunk_metadata=_chunk_meta("doc-b"),
+    )
+    await session.commit()
+
+    # Listing is per chat: chat A sees only its own document, chat B only its own.
+    a_docs = await repo.list(user_id="user-1", session_id=chat_a.session_id)
+    b_docs = await repo.list(user_id="user-1", session_id=chat_b.session_id)
+    assert [d.document.document_id for d in a_docs] == ["doc-a"]
+    assert [d.document.document_id for d in b_docs] == ["doc-b"]
+
+    # Deleting chat A cascades to its document (and chunks); chat B's document survives.
+    await sessions.delete(user_id="user-1", session_id=chat_a.session_id)
+    await session.commit()
+    assert [d.document.document_id for d in await repo.list(user_id="user-1")] == ["doc-b"]
+    remaining = (await session.execute(select(DocumentChunk))).scalars().all()
+    assert {c.document_id for c in remaining} == {"doc-b"}
+
+
 # --- D5: ingestion job dual-write compensation ---------------------------------------------
 
 def _ingestion_result() -> IngestionResult:
@@ -206,8 +248,10 @@ def _ingestion_result() -> IngestionResult:
 
 
 class _FakeIngestion:
-    def ingest_file(self, path: Path, *, user_id: str) -> IngestionResult:
-        del path, user_id
+    def ingest_file(
+        self, path: Path, *, user_id: str, session_id: str | None = None
+    ) -> IngestionResult:
+        del path, user_id, session_id
         return _ingestion_result()
 
 
@@ -225,7 +269,14 @@ class _FakeVectorStore:
         self.upserted = False
         self.deleted: list[str] = []
 
-    def upsert_chunks(self, chunks: object, embeddings: object, *, user_id: str) -> None:
+    def upsert_chunks(
+        self,
+        chunks: object,
+        embeddings: object,
+        *,
+        user_id: str,
+        session_id: str | None = None,
+    ) -> None:
         if self.fail_upsert:
             raise RuntimeError("chroma down")
         self.upserted = True
@@ -233,7 +284,9 @@ class _FakeVectorStore:
     def search(self, *a: object, **k: object) -> tuple:
         return ()
 
-    def delete_document(self, document_id: str, *, user_id: str) -> None:
+    def delete_document(
+        self, document_id: str, *, user_id: str, session_id: str | None = None
+    ) -> None:
         self.deleted.append(document_id)
 
 
@@ -346,7 +399,12 @@ class _FakeAnswerer:
         self.histories: list[tuple[object, ...]] = []
 
     def answer(
-        self, query: str, *, user_id: str, history: object = ()
+        self,
+        query: str,
+        *,
+        user_id: str,
+        session_id: str | None = None,
+        history: object = (),
     ) -> GeneratedAnswer:
         self.histories.append(tuple(history))  # type: ignore[arg-type]
         return GeneratedAnswer(answer=f"reply: {query}", language="en", citations=(_citation(),))

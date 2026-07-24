@@ -23,17 +23,20 @@ class FakeEmbeddingProvider:
 
 class FakeVectorStore:
     def __init__(self) -> None:
-        self.search_calls: list[tuple[EmbeddingVector, str, int, VectorFilter | None]] = []
+        self.search_calls: list[
+            tuple[EmbeddingVector, str, str | None, int, VectorFilter | None]
+        ] = []
 
     def search(
         self,
         query_embedding: EmbeddingVector,
         *,
         user_id: str,
+        session_id: str | None = None,
         top_k: int,
         filters: VectorFilter | None = None,
     ) -> tuple[VectorSearchResult, ...]:
-        self.search_calls.append((query_embedding, user_id, top_k, filters))
+        self.search_calls.append((query_embedding, user_id, session_id, top_k, filters))
         return (
             VectorSearchResult(
                 chunk_id="chunk-1",
@@ -50,7 +53,9 @@ class FakeVectorStore:
     def upsert_chunks(self, *args: object, **kwargs: object) -> None:
         raise NotImplementedError
 
-    def delete_document(self, document_id: str, *, user_id: str) -> None:
+    def delete_document(
+        self, document_id: str, *, user_id: str, session_id: str | None = None
+    ) -> None:
         raise NotImplementedError
 
 
@@ -75,12 +80,14 @@ def test_retrieval_service_embeds_query_and_scopes_search_to_user() -> None:
         vector_store=vector_store,
     )
 
-    context = service.retrieve("  What is RAG?  ", user_id="user-1", filters={"language": "en"})
+    context = service.retrieve(
+        "  What is RAG?  ", user_id="user-1", session_id="chat-9", filters={"language": "en"}
+    )
 
     assert context.query == "What is RAG?"
     assert embedding_provider.queries == ["What is RAG?"]
-    # user_id must reach the vector store — this is the tenancy boundary.
-    assert vector_store.search_calls == [([1.0, 0.0], "user-1", 3, {"language": "en"})]
+    # user_id and session_id must reach the vector store — the tenancy + per-chat boundary.
+    assert vector_store.search_calls == [([1.0, 0.0], "user-1", "chat-9", 3, {"language": "en"})]
     assert context.results[0].chunk_id == "chunk-1"
     # No transliterator injected -> single-query path, no transliteration reported.
     assert context.transliteration_applied is False

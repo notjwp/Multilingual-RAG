@@ -2,7 +2,6 @@
 
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import {
-  FileTextIcon,
   type LucideIcon,
   LogOutIcon,
   MessageSquareIcon,
@@ -63,7 +62,6 @@ export function CommandPalette({
           }
         },
       },
-      { id: "documents", label: "Documents", icon: FileTextIcon, run: () => router.push("/documents") },
       {
         id: "theme",
         label: "Toggle theme",

@@ -135,22 +135,24 @@ export function sendMessage(chatId: string, query: string): Promise<Message> {
   return apiFetch<Message>(`/v1/chats/${chatId}/messages`, { method: "POST", body: JSON.stringify({ query }) });
 }
 
-// --- Documents (knowledge base) ---
-export function listDocuments(): Promise<DocumentItem[]> {
-  return apiFetch<DocumentItem[]>("/v1/documents");
+// --- Documents (per-chat knowledge, M18) ---
+// Documents belong to one chat and only ground that chat's answers, so every call is scoped by
+// chatId.
+export function listChatDocuments(chatId: string): Promise<DocumentItem[]> {
+  return apiFetch<DocumentItem[]>(`/v1/chats/${chatId}/documents`);
 }
 
-export function uploadDocument(file: File): Promise<IngestionJob> {
+export function uploadChatDocument(chatId: string, file: File): Promise<IngestionJob> {
   const form = new FormData();
   form.append("file", file);
   // apiFetch leaves Content-Type unset for FormData so the browser sets the multipart boundary.
-  return apiFetch<IngestionJob>("/v1/documents/upload", { method: "POST", body: form });
+  return apiFetch<IngestionJob>(`/v1/chats/${chatId}/documents`, { method: "POST", body: form });
 }
 
 export function getIngestionJob(jobId: string): Promise<IngestionJob> {
   return apiFetch<IngestionJob>(`/v1/ingestion-jobs/${jobId}`);
 }
 
-export function deleteDocument(documentId: string): Promise<DocumentItem> {
-  return apiFetch<DocumentItem>(`/v1/documents/${documentId}`, { method: "DELETE" });
+export function deleteChatDocument(chatId: string, documentId: string): Promise<DocumentItem> {
+  return apiFetch<DocumentItem>(`/v1/chats/${chatId}/documents/${documentId}`, { method: "DELETE" });
 }

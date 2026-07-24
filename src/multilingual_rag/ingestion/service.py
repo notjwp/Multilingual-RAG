@@ -35,13 +35,17 @@ class IngestionService:
             chunk_overlap_tokens=settings.chunk_overlap_tokens,
         )
 
-    def ingest_file(self, path: Path, *, user_id: str) -> IngestionResult:
+    def ingest_file(
+        self, path: Path, *, user_id: str, session_id: str | None = None
+    ) -> IngestionResult:
         """Load a file from disk and convert it into indexable chunks."""
         loaded_document = self.loader.load(path)
-        return self.ingest_loaded_document(loaded_document, user_id=user_id)
+        return self.ingest_loaded_document(
+            loaded_document, user_id=user_id, session_id=session_id
+        )
 
     def ingest_loaded_document(
-        self, loaded_document: LoadedDocument, *, user_id: str
+        self, loaded_document: LoadedDocument, *, user_id: str, session_id: str | None = None
     ) -> IngestionResult:
         """Convert a loaded document into metadata and chunks."""
         document_text = normalize_text(
@@ -55,11 +59,12 @@ class IngestionService:
             )
 
         checksum = checksum_text(document_text)
-        # Content-addressed and user-scoped: same user re-uploading identical content gets the
-        # same id (dedup via save's delete-then-insert); different users get distinct ids (no
-        # cross-tenant clobber). The old scheme mixed a per-upload uuid4 path into the id, so
-        # dedup never worked.
-        document_id = str(uuid5(NAMESPACE_URL, f"{user_id}:{checksum}"))
+        # Content-addressed and scoped: same user re-uploading identical content into the same
+        # chat gets the same id (dedup via save's delete-then-insert); a different user — or the
+        # same file in a different chat (M18) — gets a distinct id (no cross-scope clobber). The
+        # old scheme mixed a per-upload uuid4 path into the id, so dedup never worked.
+        scope = f"{user_id}:{session_id}:{checksum}" if session_id else f"{user_id}:{checksum}"
+        document_id = str(uuid5(NAMESPACE_URL, scope))
         language = self.language_detector.detect(document_text)
 
         metadata = DocumentMetadata(

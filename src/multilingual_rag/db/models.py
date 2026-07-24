@@ -44,12 +44,23 @@ class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (
         Index("ix_documents_user_status", "user_id", "ingestion_status"),
-        # One document per (user, content) — the content-addressed dedup safety net.
-        UniqueConstraint("user_id", "checksum", name="uq_documents_user_checksum"),
+        # One document per (user, chat, content) — the content-addressed dedup safety net,
+        # now chat-scoped so the same file can live in different chats without colliding.
+        UniqueConstraint(
+            "user_id", "session_id", "checksum", name="uq_documents_user_session_checksum"
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
+    # The chat this document belongs to (M18 per-chat scoping). CASCADE: deleting a chat deletes
+    # its documents. Nullable for pre-M18 rows; new uploads always set it.
+    session_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     source: Mapped[str] = mapped_column(Text, nullable=False)
     content_type: Mapped[str] = mapped_column(String(255), nullable=False)
     checksum: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -106,6 +117,12 @@ class IngestionJob(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
+    # The chat this ingestion is scoped to (M18). CASCADE with the chat; nullable for pre-M18 rows.
+    session_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     document_id: Mapped[str | None] = mapped_column(
         String(64),
         ForeignKey("documents.id", ondelete="SET NULL"),

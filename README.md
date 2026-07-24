@@ -63,9 +63,11 @@ docker compose up --build            # postgres + redis + api + worker
 Endpoints (all under `/v1`, bearer token required except health):
 
 - `GET /healthz` · `GET /readyz`
-- `POST /v1/auth/signup` · `POST /v1/auth/login`
-- `POST /v1/documents/upload` → `{ "job_id": ... }` (async) · `GET /v1/ingestion-jobs/{job_id}`
-- `GET /v1/documents/{id}` · `DELETE /v1/documents/{id}`
+- `POST /v1/auth/signup` · `POST /v1/auth/login` · `POST /v1/auth/refresh`
+- `POST /v1/chats` · `GET /v1/chats` · `GET|PATCH|DELETE /v1/chats/{id}` · `POST /v1/chats/{id}/messages`
+- Per-chat documents (M18): `POST /v1/chats/{id}/documents` → `{ "job_id": ... }` (async) ·
+  `GET /v1/chats/{id}/documents` · `DELETE /v1/chats/{id}/documents/{doc_id}` ·
+  `GET /v1/ingestion-jobs/{job_id}`
 - `POST /v1/query`
 
 Example query:

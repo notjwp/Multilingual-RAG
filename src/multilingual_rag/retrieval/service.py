@@ -34,10 +34,11 @@ class RetrievalService:
         query: str,
         *,
         user_id: str,
+        session_id: str | None = None,
         top_k: int | None = None,
         filters: VectorFilter | None = None,
     ) -> RetrievalContext:
-        """Retrieve one user's context chunks for a query.
+        """Retrieve context chunks for a query, scoped to one user (and chat, when given).
 
         When the query is detected as **romanized Hindi** (`is_romanized_indic`) and
         transliteration is enabled, the query is transliterated to native Devanagari and *that*
@@ -54,7 +55,7 @@ class RetrievalService:
         search_text = transliterated_query if transliterated_query is not None else normalized_query
         embedding = self.embedding_provider.embed_query(search_text)
         results = self.vector_store.search(
-            embedding, user_id=user_id, top_k=limit, filters=filters
+            embedding, user_id=user_id, session_id=session_id, top_k=limit, filters=filters
         )
 
         return RetrievalContext(

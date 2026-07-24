@@ -102,10 +102,34 @@ def test_delete_is_scoped_to_the_calling_user(tmp_path: Path) -> None:
     assert [r.text for r in store.search([1.0, 0.0], user_id="user-B", top_k=10)] == ["beta"]
 
 
+def test_search_is_scoped_to_the_calling_chat(tmp_path: Path) -> None:
+    """M18: within one user, a chat's search must never surface another chat's chunks."""
+    store = ChromaVectorStore(
+        Settings(
+            chroma_persist_directory=tmp_path / "chroma",
+            chroma_collection_name="test_collection",
+        )
+    )
+    store.upsert_chunks(
+        (make_chunk("chunk-0", text="chat A"),), ([1.0, 0.0],), user_id="user-1", session_id="a"
+    )
+    store.upsert_chunks(
+        (make_chunk("chunk-0", text="chat B"),), ([1.0, 0.0],), user_id="user-1", session_id="b"
+    )
+
+    a_results = store.search([1.0, 0.0], user_id="user-1", session_id="a", top_k=10)
+    b_results = store.search([1.0, 0.0], user_id="user-1", session_id="b", top_k=10)
+
+    # Same file (same chunk_id) in two chats must not overwrite; neither chat sees the other's.
+    assert [r.text for r in a_results] == ["chat A"]
+    assert [r.text for r in b_results] == ["chat B"]
+
+
 def test_metadata_for_chunk_keeps_only_scalar_custom_metadata() -> None:
-    metadata = metadata_for_chunk(make_chunk("chunk-0"), "user-1")
+    metadata = metadata_for_chunk(make_chunk("chunk-0"), "user-1", "chat-9")
 
     assert metadata["user_id"] == "user-1"
+    assert metadata["session_id"] == "chat-9"
     assert metadata["document_id"] == "doc-1"
     assert metadata["meta_section_index"] == 1
     assert "meta_ignored" not in metadata

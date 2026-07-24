@@ -36,8 +36,9 @@ class ChromaVectorStore:
         embeddings: Sequence[EmbeddingVector],
         *,
         user_id: str,
+        session_id: str | None = None,
     ) -> None:
-        """Insert or update one user's chunk embeddings in ChromaDB."""
+        """Insert or update one user's (and chat's, when given) chunk embeddings in ChromaDB."""
         if not chunks:
             raise AppError(
                 "At least one chunk is required for vector upsert.",
@@ -55,10 +56,10 @@ class ChromaVectorStore:
         # Storage ids are namespaced by user so two users uploading the byte-identical file
         # (same checksum -> same document_id -> same chunk_id) do not overwrite each other.
         self._collection.upsert(
-            ids=[storage_id(user_id, chunk.chunk_id) for chunk in chunks],
+            ids=[storage_id(user_id, chunk.chunk_id, session_id) for chunk in chunks],
             documents=[chunk.text for chunk in chunks],
             embeddings=chroma_embeddings,
-            metadatas=[metadata_for_chunk(chunk, user_id) for chunk in chunks],
+            metadatas=[metadata_for_chunk(chunk, user_id, session_id) for chunk in chunks],
         )
 
     def search(
@@ -66,10 +67,11 @@ class ChromaVectorStore:
         query_embedding: EmbeddingVector,
         *,
         user_id: str,
+        session_id: str | None = None,
         top_k: int,
         filters: VectorFilter | None = None,
     ) -> tuple[VectorSearchResult, ...]:
-        """Search one user's chunks in ChromaDB nearest to a query embedding."""
+        """Search one user's (and chat's, when given) chunks nearest to a query embedding."""
         if not query_embedding:
             raise AppError(
                 "Query embedding must not be empty.",
@@ -87,36 +89,49 @@ class ChromaVectorStore:
         query_result = self._collection.query(
             query_embeddings=query_embeddings,
             n_results=top_k,
-            where=scoped_where(user_id, filters),
+            where=scoped_where(user_id, filters, session_id),
             include=["documents", "metadatas", "distances"],
         )
         return parse_query_result(cast(dict[str, Any], query_result))
 
-    def delete_document(self, document_id: str, *, user_id: str) -> None:
-        """Delete all of one user's chunks for a document."""
+    def delete_document(
+        self, document_id: str, *, user_id: str, session_id: str | None = None
+    ) -> None:
+        """Delete all of one user's (and chat's, when given) chunks for a document."""
         if not document_id.strip():
             raise AppError(
                 "document_id is required.",
                 code="missing_document_id",
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
-        self._collection.delete(
-            where={"$and": [{"user_id": user_id}, {"document_id": document_id}]}
-        )
+        conditions: list[dict[str, Any]] = [{"user_id": user_id}, {"document_id": document_id}]
+        if session_id is not None:
+            conditions.append({"session_id": session_id})
+        self._collection.delete(where={"$and": conditions})
 
 
-def storage_id(user_id: str, chunk_id: str) -> str:
-    """Namespace a chunk's Chroma storage id by user (transparent to API results)."""
-    return f"{user_id}:{chunk_id}"
+def storage_id(user_id: str, chunk_id: str, session_id: str | None = None) -> str:
+    """Namespace a chunk's Chroma storage id by user (and chat), transparent to API results.
+
+    Two chats holding the byte-identical file (same ``chunk_id``) must not overwrite each other,
+    so the chat scope is folded into the storage id — mirroring the per-user namespacing.
+    """
+    if session_id is None:
+        return f"{user_id}:{chunk_id}"
+    return f"{user_id}:{session_id}:{chunk_id}"
 
 
-def scoped_where(user_id: str, filters: VectorFilter | None) -> dict[str, Any]:
-    """Build a Chroma where clause pinned to one user, un-widenable by client filters.
+def scoped_where(
+    user_id: str, filters: VectorFilter | None, session_id: str | None = None
+) -> dict[str, Any]:
+    """Build a Chroma where clause pinned to one user (and chat), un-widenable by client filters.
 
-    Client conditions are AND-ed *under* the user scope, so a filter can only narrow a
-    user's own chunks, never reach another user's.
+    Client conditions are AND-ed *under* the user (and, when given, chat) scope, so a filter can
+    only narrow the scoped chunks, never reach another user's or chat's.
     """
     conditions: list[dict[str, Any]] = [{"user_id": user_id}]
+    if session_id is not None:
+        conditions.append({"session_id": session_id})
     if filters:
         conditions.extend({key: value} for key, value in filters.items())
     if len(conditions) == 1:
@@ -124,8 +139,10 @@ def scoped_where(user_id: str, filters: VectorFilter | None) -> dict[str, Any]:
     return {"$and": conditions}
 
 
-def metadata_for_chunk(chunk: DocumentChunk, user_id: str) -> dict[str, MetadataValue]:
-    """Convert chunk metadata to Chroma-compatible scalar metadata, scoped to a user."""
+def metadata_for_chunk(
+    chunk: DocumentChunk, user_id: str, session_id: str | None = None
+) -> dict[str, MetadataValue]:
+    """Convert chunk metadata to Chroma-compatible scalar metadata, scoped to a user (and chat)."""
     metadata: dict[str, MetadataValue] = {
         "user_id": user_id,
         "chunk_id": chunk.chunk_id,
@@ -136,6 +153,8 @@ def metadata_for_chunk(chunk: DocumentChunk, user_id: str) -> dict[str, Metadata
         "checksum": chunk.checksum,
         "token_count": chunk.token_count,
     }
+    if session_id is not None:
+        metadata["session_id"] = session_id
     if chunk.page is not None:
         metadata["page"] = chunk.page
 

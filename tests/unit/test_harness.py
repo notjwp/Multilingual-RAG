@@ -52,6 +52,7 @@ class FakeVectorStore:
         embeddings: Sequence[EmbeddingVector],
         *,
         user_id: str,
+        session_id: str | None = None,
     ) -> None:
         for chunk, embedding in zip(chunks, embeddings, strict=True):
             self.rows.append((user_id, chunk, embedding))
@@ -61,10 +62,11 @@ class FakeVectorStore:
         query_embedding: EmbeddingVector,
         *,
         user_id: str,
+        session_id: str | None = None,
         top_k: int,
         filters: VectorFilter | None = None,
     ) -> tuple[VectorSearchResult, ...]:
-        del filters
+        del filters, session_id
         scored = [
             (sum(a * b for a, b in zip(query_embedding, vec, strict=True)), chunk)
             for row_user, chunk, vec in self.rows
@@ -85,7 +87,9 @@ class FakeVectorStore:
             for score, chunk in scored[:top_k]
         )
 
-    def delete_document(self, document_id: str, *, user_id: str) -> None:
+    def delete_document(
+        self, document_id: str, *, user_id: str, session_id: str | None = None
+    ) -> None:
         raise NotImplementedError
 
 

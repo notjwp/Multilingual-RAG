@@ -60,7 +60,7 @@ export interface DocumentMeta {
   created_at?: string;
 }
 
-// A row from GET /v1/documents. Note: ingestion status lives on the job, not here.
+// A row from GET /v1/chats/{chatId}/documents. Note: ingestion status lives on the job, not here.
 export interface DocumentItem {
   document: DocumentMeta;
   chunk_count: number;

@@ -21,8 +21,9 @@ class VectorStore(Protocol):
         embeddings: Sequence[EmbeddingVector],
         *,
         user_id: str,
+        session_id: str | None = None,
     ) -> None:
-        """Insert or update chunk embeddings for one user."""
+        """Insert or update chunk embeddings, scoped to one user (and chat, when given)."""
         ...
 
     def search(
@@ -30,13 +31,16 @@ class VectorStore(Protocol):
         query_embedding: EmbeddingVector,
         *,
         user_id: str,
+        session_id: str | None = None,
         top_k: int,
         filters: VectorFilter | None = None,
     ) -> tuple[VectorSearchResult, ...]:
-        """Search one user's chunks for relevant matches."""
+        """Search one user's (and chat's, when given) chunks for relevant matches."""
         ...
 
-    def delete_document(self, document_id: str, *, user_id: str) -> None:
-        """Delete all of one user's chunks for a document."""
+    def delete_document(
+        self, document_id: str, *, user_id: str, session_id: str | None = None
+    ) -> None:
+        """Delete all of one user's (and chat's, when given) chunks for a document."""
         ...
 

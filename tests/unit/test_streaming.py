@@ -33,9 +33,13 @@ class FakeRetrieval:
     def __init__(self, context: RetrievalContext) -> None:
         self._context = context
         self.queries: list[str] = []
+        self.session_ids: list[str | None] = []
 
-    def retrieve(self, query: str, *, user_id: str) -> RetrievalContext:
+    def retrieve(
+        self, query: str, *, user_id: str, session_id: str | None = None
+    ) -> RetrievalContext:
         self.queries.append(query)
+        self.session_ids.append(session_id)
         return self._context
 
 
