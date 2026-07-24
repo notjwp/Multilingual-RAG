@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     # Embedding provider: bge-m3 (local, free) is the default; openai stays available.
     embedding_provider: Literal["bge-m3", "openai"] = "bge-m3"
     embedding_device: str | None = None  # bge-m3 torch device; None = auto-select CUDA
+    # Load the local embedding model at API startup instead of lazily on the first query — moves
+    # the ~10s cold-start to boot so the first message isn't slow. Off by default so the test suite
+    # and offline tooling never load the 2.2 GB model at startup.
+    warm_embeddings_on_startup: bool = False
+    # When the embedding model is already cached locally, skip Hugging Face Hub network checks on
+    # load (~6s of round-trips per process). Enable only if the model is fully cached; leave off
+    # for first-time setup so the weights can still be downloaded.
+    hf_hub_offline: bool = False
 
     # Generation: any OpenAI-compatible chat-completions endpoint. The provider is a URL, not a
     # code path — NVIDIA NIM (default), OpenRouter, Groq, a local Ollama/vLLM shim, or OpenAI

@@ -1,5 +1,7 @@
 """FastAPI application factory."""
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -29,6 +31,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         configure_logging(app_settings.log_level)
+        if app_settings.warm_embeddings_on_startup and app_settings.embedding_provider == "bge-m3":
+            await _warm_embeddings(app_settings)
         yield
 
     app = FastAPI(
@@ -57,6 +61,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_exception_handlers(app)
 
     return app
+
+
+async def _warm_embeddings(settings: Settings) -> None:
+    """Load the local embedding model at startup so the first query isn't slow.
+
+    Off the event loop (``to_thread``) and best-effort — a warm-up failure (e.g. the model isn't
+    cached) must never prevent the API from starting; it just falls back to lazy loading.
+    """
+    from multilingual_rag.embeddings.factory import build_embedding_provider
+
+    logger = logging.getLogger(__name__)
+    try:
+        logger.info("Warming embedding model at startup…")
+        provider = build_embedding_provider(settings)
+        await asyncio.to_thread(provider.embed_query, "warm up")
+        logger.info("Embedding model ready.")
+    except Exception:
+        logger.warning("Embedding warm-up failed; falling back to lazy load.", exc_info=True)
 
 
 def register_exception_handlers(app: FastAPI) -> None:

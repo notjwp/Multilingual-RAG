@@ -8,6 +8,7 @@ production ``/v1/query`` swap and Chroma re-index are Phase C.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, cast
@@ -26,6 +27,14 @@ EMBEDDING_DIM = 1024
 @lru_cache(maxsize=1)
 def _load_model(device: str | None) -> SentenceTransformer:
     """Load the ~2.2 GB model once per (process, device) — never per call."""
+    from multilingual_rag.core.config import get_settings
+
+    if get_settings().hf_hub_offline:
+        # The model is cached locally; skip Hugging Face Hub network checks (~6s/load). Set before
+        # importing sentence-transformers so huggingface_hub reads these at its import.
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
     from sentence_transformers import SentenceTransformer
 
     return cast(
