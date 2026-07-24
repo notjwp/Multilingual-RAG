@@ -2,7 +2,15 @@
 // `{error, message}` error contract into `ApiError`, and on a 401 for an *authenticated*
 // request clears the token and bounces to /login.
 
-import type { AuthResponse, ChatDetail, ChatSession, Message, User } from "@/lib/types";
+import type {
+  AuthResponse,
+  ChatDetail,
+  ChatSession,
+  DocumentItem,
+  IngestionJob,
+  Message,
+  User,
+} from "@/lib/types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
@@ -120,4 +128,24 @@ export function deleteChat(chatId: string): Promise<ChatSession> {
 // Non-streaming fallback (the UI uses the SSE path in lib/sse.ts for live answers).
 export function sendMessage(chatId: string, query: string): Promise<Message> {
   return apiFetch<Message>(`/v1/chats/${chatId}/messages`, { method: "POST", body: JSON.stringify({ query }) });
+}
+
+// --- Documents (knowledge base) ---
+export function listDocuments(): Promise<DocumentItem[]> {
+  return apiFetch<DocumentItem[]>("/v1/documents");
+}
+
+export function uploadDocument(file: File): Promise<IngestionJob> {
+  const form = new FormData();
+  form.append("file", file);
+  // apiFetch leaves Content-Type unset for FormData so the browser sets the multipart boundary.
+  return apiFetch<IngestionJob>("/v1/documents/upload", { method: "POST", body: form });
+}
+
+export function getIngestionJob(jobId: string): Promise<IngestionJob> {
+  return apiFetch<IngestionJob>(`/v1/ingestion-jobs/${jobId}`);
+}
+
+export function deleteDocument(documentId: string): Promise<DocumentItem> {
+  return apiFetch<DocumentItem>(`/v1/documents/${documentId}`, { method: "DELETE" });
 }

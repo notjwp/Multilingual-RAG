@@ -1,7 +1,8 @@
 "use client";
 
-import { LogOutIcon, PlusIcon } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { FileTextIcon, LogOutIcon, PlusIcon } from "lucide-react";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import { SessionList } from "@/components/chat/session-list";
@@ -9,9 +10,11 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth";
 import { useChats } from "@/lib/chats";
+import { cn } from "@/lib/utils";
 
 export function Sidebar() {
   const router = useRouter();
+  const pathname = usePathname();
   const { create } = useChats();
   const { user, logout } = useAuth();
 
@@ -31,11 +34,23 @@ export function Sidebar() {
 
   return (
     <aside className="flex h-dvh w-72 shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground">
-      <div className="p-3">
+      <div className="flex flex-col gap-1 p-3">
         <Button onClick={onNewChat} variant="outline" className="w-full justify-start gap-2">
           <PlusIcon className="size-4" />
           New chat
         </Button>
+        <Link
+          href="/documents"
+          className={cn(
+            "flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm transition-colors",
+            pathname === "/documents"
+              ? "bg-sidebar-accent text-sidebar-accent-foreground"
+              : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+          )}
+        >
+          <FileTextIcon className="size-4" />
+          Documents
+        </Link>
       </div>
 
       <SessionList />
