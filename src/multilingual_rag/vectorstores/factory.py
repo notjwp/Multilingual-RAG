@@ -1,7 +1,8 @@
-"""Select the vector store from settings.
+"""Build the vector store from settings.
 
-Chroma (embedded, default) or FAISS (local per-user index files). Both satisfy the ``VectorStore``
-protocol, so nothing downstream changes — switching is a ``VECTOR_STORE`` change with no code edit.
+The embedded ChromaDB adapter (cosine space) is the only backend; it satisfies the ``VectorStore``
+protocol, so callers depend on the port, not the concrete store. The import is lazy so modules that
+never build a store don't pull in ``chromadb`` at import time.
 """
 
 from __future__ import annotations
@@ -11,12 +12,7 @@ from multilingual_rag.vectorstores.base import VectorStore
 
 
 def build_vector_store(settings: Settings) -> VectorStore:
-    """Return the configured vector store adapter."""
-    if settings.vector_store == "faiss":
-        from multilingual_rag.vectorstores.faiss_store import FaissVectorStore
-
-        return FaissVectorStore(settings)
-
+    """Return the Chroma vector store adapter."""
     from multilingual_rag.vectorstores.chroma_store import ChromaVectorStore
 
     return ChromaVectorStore(settings)

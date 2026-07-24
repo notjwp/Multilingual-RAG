@@ -149,8 +149,6 @@ docker compose up --build
 - Frontend → http://localhost:3000 · API → http://localhost:8000
 - The API applies migrations on boot; the **worker** handles document ingestion (so it's never
   forgotten — ingestion silently stalls without it).
-- Defaults to the local FAISS vector store (`VECTOR_STORE=faiss`), which avoids the embedded-Chroma
-  multi-process read issue.
 - For staging/production set `ENVIRONMENT=production` and a strong `JWT_SECRET_KEY`
   (`python -c "import secrets; print(secrets.token_urlsafe(48))"`) — the app refuses to boot otherwise.
 

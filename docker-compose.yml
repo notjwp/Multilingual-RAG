@@ -14,9 +14,8 @@ x-backend-env: &backend-env
   GENERATION_API_KEY: ${GENERATION_API_KEY:-}
   GENERATION_BASE_URL: ${GENERATION_BASE_URL:-https://integrate.api.nvidia.com/v1}
   GENERATION_MODEL: ${GENERATION_MODEL:-meta/llama-3.1-8b-instruct}
-  # Local FAISS vector store (per-user files under /app/data) — avoids the Chroma multi-process issue.
-  VECTOR_STORE: ${VECTOR_STORE:-faiss}
-  FAISS_PERSIST_DIRECTORY: ${FAISS_PERSIST_DIRECTORY:-data/faiss}
+  # Embedded ChromaDB vector store (persisted under /app/data).
+  CHROMA_PERSIST_DIRECTORY: ${CHROMA_PERSIST_DIRECTORY:-data/chroma}
   RAW_DOCUMENT_DIRECTORY: ${RAW_DOCUMENT_DIRECTORY:-data/raw}
   # Set these true once the bge-m3 model is cached in the image/volume (faster, but needs the cache).
   HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-false}

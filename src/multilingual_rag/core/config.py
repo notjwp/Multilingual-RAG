@@ -74,12 +74,9 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_batch_size: int = Field(default=96, gt=0)
 
-    # Vector store backend: "chroma" (default, embedded) or "faiss" (local per-user index files —
-    # in-process, no server, avoids the embedded-Chroma multi-process read issue).
-    vector_store: Literal["chroma", "faiss"] = "chroma"
+    # Vector store: embedded ChromaDB (cosine).
     chroma_persist_directory: Path = Path("data/chroma")
     chroma_collection_name: str = "multilingual_documents"
-    faiss_persist_directory: Path = Path("data/faiss")
     raw_document_directory: Path = Path("data/raw")
     max_upload_bytes: int = Field(default=25_000_000, gt=0)
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/multilingual_rag"
