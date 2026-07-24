@@ -22,6 +22,10 @@ dependencies = [
   "celery>=5.5.0",
   "chromadb>=0.5.23",
   "email-validator>=2.2.0",
+  # Alternative vector store (VECTOR_STORE=faiss): a local, file-based FAISS index per user.
+  # filelock guards cross-process writes; numpy is already pulled in transitively.
+  "faiss-cpu>=1.9.0",
+  "filelock>=3.16.0",
   "fastapi>=0.115.6",
   # Romanized-Indic query transliteration. googletrans (default, unofficial Google Translate
   # web client — network-dependent) with indic-transliteration (sanscript) as the local fallback.

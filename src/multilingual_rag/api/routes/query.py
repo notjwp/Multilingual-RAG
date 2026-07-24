@@ -28,7 +28,7 @@ from multilingual_rag.generation.openai_compatible_generator import (
 from multilingual_rag.retrieval.service import RetrievalService
 from multilingual_rag.transliteration.factory import build_transliterator
 from multilingual_rag.vectorstores.base import MetadataValue, VectorFilter
-from multilingual_rag.vectorstores.chroma_store import ChromaVectorStore
+from multilingual_rag.vectorstores.factory import build_vector_store
 
 router = APIRouter(prefix="/v1", tags=["query"])
 CURRENT_USER_DEPENDENCY = Depends(get_current_user)
@@ -175,7 +175,7 @@ def get_query_service(request: Request) -> QueryService:
         return cast(QueryService, existing_service)
 
     settings = cast(Settings, request.app.state.settings)
-    vector_store = ChromaVectorStore(settings)
+    vector_store = build_vector_store(settings)
     retrieval_service = RetrievalService(
         settings,
         embedding_provider=build_embedding_provider(settings),

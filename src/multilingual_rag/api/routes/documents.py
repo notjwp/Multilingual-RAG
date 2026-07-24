@@ -22,7 +22,7 @@ from multilingual_rag.core.models import (
 from multilingual_rag.db.session import get_session
 from multilingual_rag.documents.repository import DocumentRepository, IngestionJobRepository
 from multilingual_rag.documents.service import DatabaseDocumentIndexingService, save_upload_bytes
-from multilingual_rag.vectorstores.chroma_store import ChromaVectorStore
+from multilingual_rag.vectorstores.factory import build_vector_store
 from multilingual_rag.workers.celery_app import ingest_document
 
 router = APIRouter(prefix="/v1/documents", tags=["documents"])
@@ -171,7 +171,7 @@ def get_document_service(request: Request, session: AsyncSession) -> DocumentSer
     return DatabaseDocumentIndexingService(
         document_repository=DocumentRepository(session),
         job_repository=IngestionJobRepository(session),
-        vector_store=ChromaVectorStore(settings),
+        vector_store=build_vector_store(settings),
     )
 
 

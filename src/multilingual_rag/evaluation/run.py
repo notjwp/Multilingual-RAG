@@ -125,12 +125,12 @@ def run_live(
             chroma_persist_directory=Path(tmp),
             chroma_collection_name="eval",
         )
-        from multilingual_rag.vectorstores.chroma_store import ChromaVectorStore
+        from multilingual_rag.vectorstores.factory import build_vector_store
 
         examples = run_live_evaluation(
             settings=settings,
             embedding_provider=BgeM3EmbeddingProvider(),
-            vector_store=ChromaVectorStore(settings),
+            vector_store=build_vector_store(settings),
             corpus=corpus,
             top_k=k,
             answer_generator=_build_generator(settings) if generate else None,

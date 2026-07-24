@@ -15,7 +15,7 @@ from multilingual_rag.embeddings.base import EmbeddingProvider
 from multilingual_rag.embeddings.factory import build_embedding_provider
 from multilingual_rag.ingestion.service import IngestionService
 from multilingual_rag.vectorstores.base import VectorStore
-from multilingual_rag.vectorstores.chroma_store import ChromaVectorStore
+from multilingual_rag.vectorstores.factory import build_vector_store
 
 
 def _chunk_metadata(chunks: object) -> list[dict[str, object]]:
@@ -51,7 +51,7 @@ async def run_ingestion_job(
     """
     ingestion_service = ingestion_service or IngestionService(settings)
     embedding_provider = embedding_provider or build_embedding_provider(settings)
-    vector_store = vector_store or ChromaVectorStore(settings)
+    vector_store = vector_store or build_vector_store(settings)
 
     job_repository = IngestionJobRepository(session)
     job = await session.get(IngestionJob, job_id)
