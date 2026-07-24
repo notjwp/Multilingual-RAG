@@ -3,17 +3,19 @@
 import { ArrowUpIcon, SquareIcon } from "lucide-react";
 import { useState } from "react";
 
+import { ChatFiles } from "@/components/chat/chat-files";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 
 interface ComposerProps {
+  chatId: string;
   onSend: (query: string) => void;
   onStop: () => void;
   streaming: boolean;
   disabled?: boolean;
 }
 
-export function Composer({ onSend, onStop, streaming, disabled }: ComposerProps) {
+export function Composer({ chatId, onSend, onStop, streaming, disabled }: ComposerProps) {
   const [value, setValue] = useState("");
 
   function submit() {
@@ -47,8 +49,11 @@ export function Composer({ onSend, onStop, streaming, disabled }: ComposerProps)
         disabled={disabled}
         rows={1}
         placeholder="Message… (Enter to send, Shift+Enter for a new line)"
-        className="max-h-48 min-h-12 resize-none pr-12"
+        className="max-h-48 min-h-12 resize-none pr-12 pl-12"
       />
+      <div className="absolute bottom-2 left-2">
+        <ChatFiles chatId={chatId} />
+      </div>
       <div className="absolute right-2 bottom-2">
         {streaming ? (
           <Button

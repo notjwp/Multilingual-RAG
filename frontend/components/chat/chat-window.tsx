@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { ChatFiles } from "@/components/chat/chat-files";
 import { Composer } from "@/components/chat/composer";
 import { MessageBubble, type UiMessage } from "@/components/chat/message-bubble";
 import { Button } from "@/components/ui/button";
@@ -138,9 +137,6 @@ export function ChatWindow({ chatId }: { chatId: string }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center justify-end border-b px-4 py-2">
-        <ChatFiles chatId={chatId} />
-      </div>
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         <div className="mx-auto flex max-w-3xl flex-col gap-4 px-4 py-6">
           {loading ? (
@@ -173,7 +169,13 @@ export function ChatWindow({ chatId }: { chatId: string }) {
 
       <div className="border-t bg-background">
         <div className="mx-auto max-w-3xl px-4 py-3">
-          <Composer onSend={send} onStop={stop} streaming={streaming} disabled={loading} />
+          <Composer
+            chatId={chatId}
+            onSend={send}
+            onStop={stop}
+            streaming={streaming}
+            disabled={loading}
+          />
           <p className="mt-2 text-center text-xs text-muted-foreground">
             Multilingual RAG can make mistakes. Verify important information.
           </p>

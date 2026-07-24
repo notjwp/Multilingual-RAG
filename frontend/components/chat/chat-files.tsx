@@ -159,17 +159,21 @@ export function ChatFiles({ chatId }: { chatId: string }) {
 
   return (
     <>
+      {/* type="button" so this never submits the composer form it sits inside. */}
       <Button
-        variant="outline"
-        size="sm"
-        className="gap-1.5"
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        className="relative"
         onClick={() => setOpen(true)}
-        aria-label="Files in this chat"
+        aria-label="Attach files to this chat"
+        title="Files in this chat"
       >
         <PaperclipIcon className="size-4" />
-        Files
         {count > 0 && (
-          <span className="rounded bg-muted px-1.5 text-xs text-muted-foreground">{count}</span>
+          <span className="absolute -top-0.5 -right-0.5 flex size-4 items-center justify-center rounded-full bg-primary text-[10px] leading-none font-medium text-primary-foreground">
+            {count > 9 ? "9+" : count}
+          </span>
         )}
       </Button>
 
