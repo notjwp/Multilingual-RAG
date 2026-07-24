@@ -63,6 +63,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
   }, []);
 
+  // Keep the session alive: refresh the short-lived token periodically while signed in.
+  // (A lapse just means the next protected request 401s and RequireAuth routes to /login.)
+  useEffect(() => {
+    if (!user) return;
+    const interval = setInterval(
+      () => {
+        api
+          .refresh()
+          .then((res) => api.setToken(res.access_token))
+          .catch(() => undefined);
+      },
+      20 * 60 * 1000,
+    );
+    return () => clearInterval(interval);
+  }, [user]);
+
   const value = useMemo<AuthState>(
     () => ({ user, loading, login, signup, logout }),
     [user, loading, login, signup, logout],

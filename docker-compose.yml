@@ -1,3 +1,27 @@
+# Shared backend env (top-level extension anchor, reused by api + worker).
+x-backend-env: &backend-env
+  APP_NAME: ${APP_NAME:-multilingual-rag}
+  ENVIRONMENT: ${ENVIRONMENT:-local}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/multilingual_rag}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+  CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
+  JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+  # Generation (OpenAI-compatible; NVIDIA NIM by default). Set GENERATION_API_KEY to enable answers.
+  GENERATION_API_KEY: ${GENERATION_API_KEY:-}
+  GENERATION_BASE_URL: ${GENERATION_BASE_URL:-https://integrate.api.nvidia.com/v1}
+  GENERATION_MODEL: ${GENERATION_MODEL:-meta/llama-3.1-8b-instruct}
+  # Local FAISS vector store (per-user files under /app/data) — avoids the Chroma multi-process issue.
+  VECTOR_STORE: ${VECTOR_STORE:-faiss}
+  FAISS_PERSIST_DIRECTORY: ${FAISS_PERSIST_DIRECTORY:-data/faiss}
+  RAW_DOCUMENT_DIRECTORY: ${RAW_DOCUMENT_DIRECTORY:-data/raw}
+  # Set these true once the bge-m3 model is cached in the image/volume (faster, but needs the cache).
+  HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-false}
+  WARM_EMBEDDINGS_ON_STARTUP: ${WARM_EMBEDDINGS_ON_STARTUP:-false}
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -33,23 +57,8 @@ services:
       redis:
         condition: service_healthy
     environment:
-      APP_NAME: ${APP_NAME:-multilingual-rag}
-      ENVIRONMENT: ${ENVIRONMENT:-local}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
-      OPENAI_EMBEDDING_BATCH_SIZE: ${OPENAI_EMBEDDING_BATCH_SIZE:-96}
-      OPENAI_GENERATION_MODEL: ${OPENAI_GENERATION_MODEL:-gpt-4.1-mini}
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/multilingual_rag}
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
-      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
-      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
-      CHROMA_PERSIST_DIRECTORY: ${CHROMA_PERSIST_DIRECTORY:-data/chroma}
-      CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-multilingual_documents}
-      RAW_DOCUMENT_DIRECTORY: ${RAW_DOCUMENT_DIRECTORY:-data/raw}
+      <<: *backend-env
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:3000}
     ports:
       - "8000:8000"
     volumes:
@@ -63,32 +72,27 @@ services:
 
   worker:
     build: .
-    command: celery -A multilingual_rag.workers.celery_app.celery_app worker --loglevel=INFO
+    command: celery -A multilingual_rag.workers.celery_app.celery_app worker --loglevel=INFO --pool=solo
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     environment:
-      APP_NAME: ${APP_NAME:-multilingual-rag}
-      ENVIRONMENT: ${ENVIRONMENT:-local}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
-      OPENAI_EMBEDDING_BATCH_SIZE: ${OPENAI_EMBEDDING_BATCH_SIZE:-96}
-      OPENAI_GENERATION_MODEL: ${OPENAI_GENERATION_MODEL:-gpt-4.1-mini}
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/multilingual_rag}
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
-      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
-      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
-      CHROMA_PERSIST_DIRECTORY: ${CHROMA_PERSIST_DIRECTORY:-data/chroma}
-      CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-multilingual_documents}
-      RAW_DOCUMENT_DIRECTORY: ${RAW_DOCUMENT_DIRECTORY:-data/raw}
+      <<: *backend-env
     volumes:
       - ./data:/app/data
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the client bundle — the URL the browser uses to reach the API.
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
 
 volumes:
   postgres_data:

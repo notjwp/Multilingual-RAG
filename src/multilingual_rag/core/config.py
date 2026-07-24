@@ -85,7 +85,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/multilingual_rag"
     jwt_secret_key: SecretStr = SecretStr(DEFAULT_JWT_SECRET)
     jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = Field(default=60, gt=0)
+    # Short-lived access tokens; the frontend refreshes via /v1/auth/refresh before they expire.
+    access_token_expire_minutes: int = Field(default=30, gt=0)
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
@@ -138,14 +139,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def reject_default_secret_in_prod(self) -> Self:
-        """Refuse to boot deployed environments with the placeholder JWT secret."""
-        if (
-            self.environment in ("production", "staging")
-            and self.jwt_secret_key.get_secret_value() == DEFAULT_JWT_SECRET
-        ):
+        """Refuse to boot deployed environments with a placeholder or weak JWT secret."""
+        if self.environment not in ("production", "staging"):
+            return self
+        secret = self.jwt_secret_key.get_secret_value()
+        if secret == DEFAULT_JWT_SECRET:
             raise ValueError(
                 "jwt_secret_key must be set to a non-default value in "
                 f"{self.environment}; refusing to start with the placeholder secret."
+            )
+        if len(secret.encode("utf-8")) < 32:
+            raise ValueError(
+                f"jwt_secret_key must be at least 32 bytes for HS256 in {self.environment}. "
+                'Generate one with: python -c "import secrets; print(secrets.token_urlsafe(48))"'
             )
         return self
 

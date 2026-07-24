@@ -135,6 +135,23 @@ docker compose up --build
 python scripts/smoke_test.py --base-url http://127.0.0.1:8000
 ```
 
+## Run the whole stack (Docker)
+
+One command runs Postgres, Redis, the API, the ingestion **worker**, and the frontend:
+
+```bash
+cp .env.example .env          # set GENERATION_API_KEY for chat answers
+docker compose up --build
+```
+
+- Frontend → http://localhost:3000 · API → http://localhost:8000
+- The API applies migrations on boot; the **worker** handles document ingestion (so it's never
+  forgotten — ingestion silently stalls without it).
+- Defaults to the local FAISS vector store (`VECTOR_STORE=faiss`), which avoids the embedded-Chroma
+  multi-process read issue.
+- For staging/production set `ENVIRONMENT=production` and a strong `JWT_SECRET_KEY`
+  (`python -c "import secrets; print(secrets.token_urlsafe(48))"`) — the app refuses to boot otherwise.
+
 ## Documentation
 
 - `docs/architecture.md` — HLD/LLD, request flows, known defects.

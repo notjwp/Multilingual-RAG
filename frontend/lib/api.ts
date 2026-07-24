@@ -104,6 +104,11 @@ export function me(): Promise<User> {
   return apiFetch<User>("/v1/auth/me");
 }
 
+// Re-issue a fresh token for the current (still-valid) session — a sliding session.
+export function refresh(): Promise<AuthResponse> {
+  return apiFetch<AuthResponse>("/v1/auth/refresh", { method: "POST" });
+}
+
 // --- Chats ---
 export function listChats(): Promise<ChatSession[]> {
   return apiFetch<ChatSession[]>("/v1/chats");

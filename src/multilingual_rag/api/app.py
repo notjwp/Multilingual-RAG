@@ -9,6 +9,9 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.responses import Response
+from starlette.types import ASGIApp
 
 from multilingual_rag import __version__
 from multilingual_rag.api.routes.auth import router as auth_router
@@ -22,6 +25,23 @@ from multilingual_rag.api.schemas import ErrorResponse
 from multilingual_rag.core.config import Settings, get_settings
 from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.logging import configure_logging
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Attach hardening response headers (and HSTS in deployed environments)."""
+
+    def __init__(self, app: ASGIApp, *, hsts: bool) -> None:
+        super().__init__(app)
+        self._hsts = hsts
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        if self._hsts:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -42,13 +62,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = app_settings
 
+    app.add_middleware(
+        SecurityHeadersMiddleware,
+        hsts=app_settings.environment in ("production", "staging"),
+    )
     # Allow the browser frontend (M16) to call the API and read the SSE stream cross-origin.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(app_settings.cors_allow_origins),
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
     )
 
     app.include_router(health_router)

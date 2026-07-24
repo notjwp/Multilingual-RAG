@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from multilingual_rag.auth.dependencies import get_current_user
 from multilingual_rag.auth.repository import UserRepository
+from multilingual_rag.auth.security import create_access_token
 from multilingual_rag.auth.service import AuthService
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.models import UserRecord
@@ -64,6 +65,17 @@ async def login(
         password=body.password,
     )
     return AuthResponse(access_token=token, user=user)
+
+
+@router.post("/refresh", response_model=AuthResponse)
+async def refresh(
+    request: Request,
+    current_user: UserRecord = CURRENT_USER_DEPENDENCY,
+) -> AuthResponse:
+    """Issue a fresh access token for the current user (sliding session; needs a valid token)."""
+    settings = cast(Settings, request.app.state.settings)
+    token = create_access_token(settings, subject=current_user.user_id, email=current_user.email)
+    return AuthResponse(access_token=token, user=current_user)
 
 
 @router.get("/me", response_model=UserRecord)
