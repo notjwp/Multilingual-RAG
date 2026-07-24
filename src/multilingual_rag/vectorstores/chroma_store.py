@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
+import threading
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
@@ -19,16 +22,54 @@ type ChromaEmbedding = Sequence[float] | Sequence[int]
 
 
 class ChromaVectorStore:
-    """Persist and search document chunks in ChromaDB."""
+    """Persist and search document chunks in ChromaDB.
+
+    Embedded Chroma caches each process's index segments in memory, so a client opened *before*
+    another process (the Celery worker) writes will silently miss — or fail to resolve ("Error
+    finding id") — those rows. To stay correct across the separate API and worker processes, this
+    adapter records the persist directory's newest mtime and, when it advances (another process
+    wrote), drops Chroma's process-wide client cache and reopens, reloading segments from disk. All
+    operations are serialized under a lock so a reopen never tears a client down mid-query.
+    """
 
     def __init__(self, settings: Settings) -> None:
-        settings.chroma_persist_directory.mkdir(parents=True, exist_ok=True)
-        self._client = chromadb.PersistentClient(path=str(settings.chroma_persist_directory))
+        self._dir = settings.chroma_persist_directory
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._collection_name = settings.chroma_collection_name
+        self._lock = threading.Lock()
+        self._loaded_mtime = -1.0
+        self._client: Any = None
+        self._collection: Any = None
+        self._open()
+
+    def _open(self) -> None:
+        """(Re)open the client from disk, dropping Chroma's process-wide cache first so another
+        process's writes are read from disk rather than served from a stale in-memory segment."""
+        from chromadb.api.shared_system_client import SharedSystemClient
+
+        SharedSystemClient.clear_system_cache()
+        self._client = chromadb.PersistentClient(path=str(self._dir))
         self._collection = self._client.get_or_create_collection(
-            name=settings.chroma_collection_name,
+            name=self._collection_name,
             embedding_function=None,
             metadata={"hnsw:space": "cosine"},
         )
+        self._loaded_mtime = self._dir_mtime()
+
+    def _dir_mtime(self) -> float:
+        """Newest mtime anywhere under the persist dir — the signal another process has written."""
+        latest = 0.0
+        for root, _dirs, files in os.walk(self._dir):
+            for name in files:
+                with contextlib.suppress(OSError):
+                    latest = max(latest, os.stat(os.path.join(root, name)).st_mtime)
+        return latest
+
+    def _current(self) -> Any:
+        """The live collection, reopened first if another process wrote. Caller holds the lock."""
+        if self._dir_mtime() > self._loaded_mtime:
+            self._open()
+        return self._collection
 
     def upsert_chunks(
         self,
@@ -55,12 +96,14 @@ class ChromaVectorStore:
         chroma_embeddings: list[ChromaEmbedding] = [embedding for embedding in embeddings]
         # Storage ids are namespaced by user so two users uploading the byte-identical file
         # (same checksum -> same document_id -> same chunk_id) do not overwrite each other.
-        self._collection.upsert(
-            ids=[storage_id(user_id, chunk.chunk_id, session_id) for chunk in chunks],
-            documents=[chunk.text for chunk in chunks],
-            embeddings=chroma_embeddings,
-            metadatas=[metadata_for_chunk(chunk, user_id, session_id) for chunk in chunks],
-        )
+        with self._lock:
+            self._current().upsert(
+                ids=[storage_id(user_id, chunk.chunk_id, session_id) for chunk in chunks],
+                documents=[chunk.text for chunk in chunks],
+                embeddings=chroma_embeddings,
+                metadatas=[metadata_for_chunk(chunk, user_id, session_id) for chunk in chunks],
+            )
+            self._loaded_mtime = self._dir_mtime()  # our own write; don't reopen next op
 
     def search(
         self,
@@ -86,12 +129,13 @@ class ChromaVectorStore:
             )
 
         query_embeddings: list[ChromaEmbedding] = [query_embedding]
-        query_result = self._collection.query(
-            query_embeddings=query_embeddings,
-            n_results=top_k,
-            where=scoped_where(user_id, filters, session_id),
-            include=["documents", "metadatas", "distances"],
-        )
+        with self._lock:
+            query_result = self._current().query(
+                query_embeddings=query_embeddings,
+                n_results=top_k,
+                where=scoped_where(user_id, filters, session_id),
+                include=["documents", "metadatas", "distances"],
+            )
         return parse_query_result(cast(dict[str, Any], query_result))
 
     def delete_document(
@@ -107,7 +151,9 @@ class ChromaVectorStore:
         conditions: list[dict[str, Any]] = [{"user_id": user_id}, {"document_id": document_id}]
         if session_id is not None:
             conditions.append({"session_id": session_id})
-        self._collection.delete(where={"$and": conditions})
+        with self._lock:
+            self._current().delete(where={"$and": conditions})
+            self._loaded_mtime = self._dir_mtime()
 
 
 def storage_id(user_id: str, chunk_id: str, session_id: str | None = None) -> str:

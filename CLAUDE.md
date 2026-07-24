@@ -85,6 +85,6 @@ Recognized attrs: `settings`, `query_service`, `document_service`, `current_user
 
 Migrations: `alembic/env.py` ignores the `sqlalchemy.url` in `alembic.ini` and derives the URL from `get_settings().database_url`, rewriting the async driver to sync (`postgresql+asyncpg` → `postgresql`). Configure migrations through `DATABASE_URL`.
 
-Chroma specifics (`vectorstores/chroma_store.py`): cosine space, `score = 1.0 - distance`, and metadata must be flat scalars — custom chunk metadata is stored prefixed with `meta_` and unwrapped on read.
+Chroma specifics (`vectorstores/chroma_store.py`): cosine space, `score = 1.0 - distance`, and metadata must be flat scalars — custom chunk metadata is stored prefixed with `meta_` and unwrapped on read. **Multi-process safety:** embedded Chroma caches index segments per process, so the API's client would go stale after the Celery worker writes (silent wrong results / "Error finding id"). The adapter guards this with *reload-on-change* — it tracks the persist dir's newest mtime and, when it advances, clears Chroma's process-wide client cache and reopens (all ops serialized under a lock). Covered by `tests/integration/test_chroma_multiprocess.py`; no Chroma server required.
 
 The `chat_sessions`, `messages`, and `message_citations` tables in `db/models.py` are unused placeholders for a future milestone, not dead code.
