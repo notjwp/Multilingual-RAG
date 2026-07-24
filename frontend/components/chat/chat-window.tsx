@@ -1,11 +1,13 @@
 "use client";
 
+import { RotateCcwIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Composer } from "@/components/chat/composer";
 import { MessageBubble, type UiMessage } from "@/components/chat/message-bubble";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import * as api from "@/lib/api";
 import { useChats } from "@/lib/chats";
@@ -58,16 +60,8 @@ export function ChatWindow({ chatId }: { chatId: string }) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
-  async function send(query: string) {
-    if (streaming) return;
-    const wasFirstTurn = messages.length === 0;
-    const assistantKey = crypto.randomUUID();
-
-    setMessages((prev) => [
-      ...prev,
-      { key: crypto.randomUUID(), role: "user", content: query, citations: [] },
-      { key: assistantKey, role: "assistant", content: "", citations: [], pending: true },
-    ]);
+  // Stream one query into a specific assistant bubble (shared by first send and retry).
+  async function runStream(query: string, assistantKey: string, wasFirstTurn: boolean) {
     setStreaming(true);
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -83,7 +77,9 @@ export function ChatWindow({ chatId }: { chatId: string }) {
         completed = true;
         setMessages((prev) =>
           prev.map((m) =>
-            m.key === assistantKey ? { ...m, serverId: message_id, citations, pending: false } : m,
+            m.key === assistantKey
+              ? { ...m, serverId: message_id, citations, pending: false, error: false }
+              : m,
           ),
         );
       },
@@ -105,9 +101,39 @@ export function ChatWindow({ chatId }: { chatId: string }) {
     if (completed && wasFirstTurn) void refresh();
   }
 
+  async function send(query: string) {
+    if (streaming) return;
+    const wasFirstTurn = messages.length === 0;
+    const assistantKey = crypto.randomUUID();
+    setMessages((prev) => [
+      ...prev,
+      { key: crypto.randomUUID(), role: "user", content: query, citations: [] },
+      { key: assistantKey, role: "assistant", content: "", citations: [], pending: true },
+    ]);
+    await runStream(query, assistantKey, wasFirstTurn);
+  }
+
+  // Re-run the last user turn into the failed assistant bubble (a failed stream isn't persisted
+  // server-side, so this creates no duplicate turn).
+  function retry() {
+    if (streaming) return;
+    const n = messages.length;
+    const last = messages[n - 1];
+    const prevUser = messages[n - 2];
+    if (!last || last.role !== "assistant" || !last.error) return;
+    if (!prevUser || prevUser.role !== "user") return;
+    setMessages((prev) =>
+      prev.map((m) => (m.key === last.key ? { ...m, content: "", error: false, pending: true } : m)),
+    );
+    void runStream(prevUser.content, last.key, n <= 2);
+  }
+
   function stop() {
     controllerRef.current?.abort();
   }
+
+  const lastMessage = messages.at(-1);
+  const canRetry = !loading && !streaming && lastMessage?.role === "assistant" && !!lastMessage.error;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -128,6 +154,14 @@ export function ChatWindow({ chatId }: { chatId: string }) {
             </div>
           ) : (
             messages.map((m) => <MessageBubble key={m.key} message={m} />)
+          )}
+          {canRetry && (
+            <div className="flex justify-start">
+              <Button variant="outline" size="sm" className="gap-1.5" onClick={retry}>
+                <RotateCcwIcon className="size-3.5" />
+                Retry
+              </Button>
+            </div>
           )}
         </div>
       </div>

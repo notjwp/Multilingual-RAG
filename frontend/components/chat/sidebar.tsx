@@ -1,6 +1,6 @@
 "use client";
 
-import { FileTextIcon, LogOutIcon, PlusIcon } from "lucide-react";
+import { FileTextIcon, LogOutIcon, PlusIcon, SearchIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -51,6 +51,15 @@ export function Sidebar() {
           <FileTextIcon className="size-4" />
           Documents
         </Link>
+        <button
+          type="button"
+          onClick={() => window.dispatchEvent(new CustomEvent("open-command-palette"))}
+          className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+        >
+          <SearchIcon className="size-4" />
+          <span className="flex-1 text-left">Search</span>
+          <kbd className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">⌘K</kbd>
+        </button>
       </div>
 
       <SessionList />

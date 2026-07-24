@@ -32,12 +32,16 @@ export function Composer({ onSend, onStop, streaming, disabled }: ComposerProps)
       }}
     >
       <Textarea
+        autoFocus
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             submit();
+          } else if (e.key === "Escape" && streaming) {
+            e.preventDefault();
+            onStop();
           }
         }}
         disabled={disabled}
