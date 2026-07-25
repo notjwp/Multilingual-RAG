@@ -1,174 +1,325 @@
 # Multilingual RAG
 
-A multilingual **chat app over your own documents** — ask questions in any language and get
-grounded, cited answers, streamed token-by-token. Python 3.13 · FastAPI · ChromaDB backend with a
-Next.js web UI, and it runs **free by default** — local `bge-m3` embeddings and a free
-OpenAI-compatible generation endpoint (NVIDIA NIM), no paid API required. Ports-and-adapters
-throughout, `mypy --strict`.
+**Chat with your own documents — in any language.**
 
-## Features
+Upload a PDF, a Markdown file, or a text document into a chat, then ask questions about it. You get
+a real answer with **citations pointing back to the exact passage** it came from, streamed word by
+word like ChatGPT.
 
-- **Chat UI, streaming.** A ChatGPT-style web app (`frontend/`): multi-session chat with persisted
-  history, token-by-token SSE streaming, markdown + inline citations, ⌘K command palette, and
-  light/dark themes.
-- **Documents are per chat.** Upload a file *into a chat* (paperclip, left of the message box) and
-  it grounds only *that* chat's answers — invisible to every other chat. Deleting a chat deletes
-  its documents.
-- **Follow-up questions work.** Multi-turn context: a follow-up is condensed into a standalone
-  query for retrieval, while the answer keeps the conversation's thread.
-- **Free, local-first core.** Default embeddings are `bge-m3` (local, 1024-dim, strong
-  cross-lingual retrieval); generation targets any OpenAI-compatible endpoint (NVIDIA NIM by
-  default) — switching providers is a URL change, not code.
-- **Multilingual retrieval** with tokenizer-aware chunking (CJK/Thai don't split on whitespace)
-  and answer-language resolution.
-- **Romanized Indic queries (Hindi).** Type Hindi in the Latin alphabet
-  (`bharat ki rajdhani kya hai`) and it's detected, transliterated to Devanagari, and matched
-  against your native-script index. See [Romanized Hindi](#romanized-hindi-queries).
-- **Authenticated, multi-tenant.** JWT bearer auth; every user retrieves only their own
-  documents, enforced at the vector store, not just the metadata table.
-- **Asynchronous ingestion.** Upload returns a `job_id`; a Celery worker ingests → embeds →
-  indexes → records rows, and clients poll job status. Postgres is the source of truth.
-- **Measurable.** A live evaluation harness (recall@k / MRR / nDCG, citation precision/recall,
-  faithfulness) runs the real pipeline over the XQuAD corpus — free, no API calls.
+The part that makes it unusual: **the language you ask in doesn't have to match the language of
+your documents.** Ask in English about a Hindi document and it works. You can even type Hindi using
+English letters — `bharat ki rajdhani kya hai` — and it figures that out too.
 
-## Stack
+And it costs nothing to run. No OpenAI bill, no paid API key.
 
-**Backend:** Python 3.13 · FastAPI · Pydantic v2 · SQLAlchemy 2 (async) + Alembic · Postgres ·
-Celery + Redis · ChromaDB · `sentence-transformers` (bge-m3) · `googletrans` +
-`indic-transliteration` (romanized-Hindi) · pytest / ruff / mypy.
+---
 
-**Frontend:** Next.js 16 (App Router) · React 19 · Tailwind v4 · Base UI.
+## What problem does this actually solve?
 
-## Local setup
+Large language models are confident liars. Ask one about *your* company handbook and it will
+happily invent an answer, because it has never seen your handbook.
+
+The fix is a technique called **RAG** (Retrieval-Augmented Generation), and it works in two steps:
+
+1. **Retrieve** — search your documents for the handful of passages most relevant to the question
+2. **Generate** — hand *only those passages* to the language model and say "answer using this"
+
+The model stops guessing, because the facts are sitting right in front of it. And because you know
+which passages were used, every answer can cite its sources — so you can check them.
+
+This project is a complete, working implementation of that idea, with a web app on top.
+
+---
+
+## What you can do with it
+
+| | |
+|---|---|
+| 💬 **Chat naturally** | Multiple conversations, saved history, answers streamed as they're written |
+| 📎 **Attach files to a chat** | Click the paperclip next to the message box. That file grounds *only that conversation* |
+| 🔒 **Keep chats separate** | A document in one chat is invisible to every other chat. Delete the chat, the document goes with it |
+| 🌍 **Mix languages freely** | Ask in English, get answers from Chinese, Hindi, Arabic, or Thai documents |
+| 🔤 **Type Indic languages in English letters** | Romanized Hindi is detected and converted automatically. Kannada and Telugu are available too |
+| 💬 **Ask follow-ups** | "What about the second one?" works — it understands what you're referring to |
+| 📎 **Verify every claim** | Answers carry numbered citations linking back to the source passage |
+
+---
+
+## Quick start
+
+You need [Docker](https://www.docker.com/products/docker-desktop/) installed. That's it.
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Then open **http://localhost:3000** and sign up.
+
+> **One optional step for full functionality.** Searching your documents works immediately, but
+> *writing answers* needs a language model. Grab a **free** key from
+> [build.nvidia.com](https://build.nvidia.com) (no credit card) and put it in `.env` as
+> `GENERATION_API_KEY=...`. Any OpenAI-compatible provider works — see
+> [Choosing a language model](#choosing-a-language-model).
+
+**Be patient on the very first run.** It downloads the ~2.2 GB search model. After that it starts
+in seconds, because the model is cached.
+
+That single command starts five pieces: the web app, the API, a background worker that processes
+uploads, a Postgres database, and Redis.
+
+---
+
+## How it works
+
+Two things happen at different times: documents get **prepared** when you upload them, and
+**searched** when you ask a question.
+
+```mermaid
+flowchart TB
+    subgraph prep ["When you upload a file"]
+        A[Your document] --> B[Split into passages]
+        B --> C[Convert each to a vector]
+        C --> D[(Store in the search index)]
+    end
+    subgraph ask ["When you ask a question"]
+        Q[Your question] --> R[Convert to a vector]
+        R --> S[Find the closest passages]
+        D -.-> S
+        S --> T[Language model writes<br/>an answer from them]
+        T --> U[Answer + citations]
+    end
+```
+
+### The key idea: meaning becomes coordinates
+
+Every passage is converted into a long list of numbers — a **vector** — that represents its
+meaning. Similar meanings land close together in that space.
+
+This is why cross-language search works. A model called **bge-m3** was trained so that "capital of
+India" in English lands in nearly the same place as the same phrase in Hindi or Chinese. Searching
+is then just geometry: turn the question into a vector, find the nearest passages.
+
+### Splitting documents is harder than it looks
+
+Documents get cut into overlapping passages ("chunks") small enough to fit in the model's context.
+
+The obvious approach — split on spaces — quietly breaks for much of the world. Chinese, Japanese,
+and Thai **don't put spaces between words**, so a whole Chinese document would collapse into one
+giant chunk and become unsearchable. This project counts *tokens* using the same tokenizer the
+search model uses, so every language chunks correctly.
+
+### Uploads happen in the background
+
+Processing a large PDF can take minutes, so uploading doesn't make you wait. The upload returns a
+job ID immediately, a background worker does the slow work, and the UI polls until it's done.
+
+---
+
+## The multilingual story
+
+This was the hardest part to get right, and it's where the interesting engineering lives.
+
+### Typing Hindi with English letters
+
+Millions of people type Hindi phonetically in the Latin alphabet — `bharat ki rajdhani kya hai`
+instead of `भारत की राजधानी क्या है`. Search engines handle this. Most RAG systems don't.
+
+Here's why it breaks: the meaning-vector model relies heavily on the **script**. Latin-typed Hindi
+looks like gibberish to it — not Hindi, not English — so it lands in the wrong region of the vector
+space entirely. Measured against a Hindi document collection, it found the right passage only **20%**
+of the time.
+
+The fix is a detour rather than a bigger model. Before searching, the system:
+
+1. **Notices** the query is romanized Hindi (by spotting distinctly-Hindi function words like *kya*,
+   *hai*, *ki* — fast, local, no network)
+2. **Converts** it to Devanagari script
+3. **Searches** using that native-script form
+
+Accuracy went from **20% → 67%** — more than 3× better. Plain English queries are left completely
+untouched, so nothing else regresses.
+
+**Kannada and Telugu** are supported the same way and are off by default. Turning them on uses a
+small trained classifier that runs locally (no network calls, no per-query cost) and correctly
+identifies the language ~96–97% of the time with zero false positives on English.
+
+### Why there's no reranker
+
+A common RAG upgrade is a "reranker" — a second, slower model that reorders results. This project
+deliberately doesn't have one, and that was a measured decision, not an oversight.
+
+An early experiment compared two search models on how often the *very first* result was correct:
+
+| Model | First result correct (English → Chinese) |
+|---|---|
+| e5 | 30% — needs a reranker to fix the ordering |
+| **bge-m3** | **67%** — already ordered well |
+
+bge-m3 ranked well enough on its own that a reranker would have added cost and latency for little
+gain. An entire planned milestone was cancelled because the data said it wasn't needed. The same
+reasoning applies to keyword (BM25) search — it's noted as optional, not missing.
+
+---
+
+## Choosing a language model
+
+The system talks to any provider that speaks the **OpenAI API format**, which is nearly all of them.
+Switching providers is a URL change in `.env`, not a code change.
+
+| Provider | Cost | Set `GENERATION_BASE_URL` to |
+|---|---|---|
+| **NVIDIA NIM** (default) | Free tier, no card | `https://integrate.api.nvidia.com/v1` |
+| OpenRouter | Free tier available | `https://openrouter.ai/api/v1` |
+| Groq | Free tier, very fast | `https://api.groq.com/openai/v1` |
+| Ollama | Free, fully offline | `http://localhost:11434/v1` |
+| OpenAI | Paid | `https://api.openai.com/v1` |
+
+Searching your documents is always free and always local — only answer-writing calls a provider.
+
+---
+
+## Configuration
+
+Everything lives in `.env` (copy it from `.env.example`). The settings you're most likely to touch:
+
+| Setting | What it does |
+|---|---|
+| `GENERATION_API_KEY` | Your language-model key. Without it, search works but answers don't |
+| `GENERATION_MODEL` | Which model writes answers (default: Llama 3.1 8B) |
+| `TRANSLITERATION_LANGUAGES` | Set to `hi,kn,te` to enable Kannada and Telugu |
+| `TRANSLITERATION_DETECTOR` | `word-list` (default, Hindi only) · `muril` (local, adds kn/te) · `google` |
+| `EMBEDDING_PROVIDER` | `bge-m3` (local, free, default) or `openai` |
+| `JWT_SECRET_KEY` | Login-token signing key. **Must** be changed for real deployments |
+| `RETRIEVAL_TOP_K` | How many passages to feed the model (default: 8) |
+
+---
+
+## Running it for development
+
+The Docker route above is the easy one. To work on the code itself, run the pieces directly:
 
 ```powershell
+# 1. Install (Python 3.13)
 py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
-```
 
-Copy `.env.example` to `.env`. Everything runs free out of the box; set `GENERATION_API_KEY`
-(a free NVIDIA NIM key from https://build.nvidia.com) to enable answer generation. Postgres and
-Redis are needed for anything touching documents or auth — `docker compose up postgres redis` is
-the quickest way.
-
-## Verification
-
-```powershell
-python -m pytest
-python -m ruff check .          # add --fix to autofix
-python -m mypy src
-```
-
-Model- and Postgres-backed tests are opt-in / auto-skipped: `RUN_MODEL_TESTS=1` exercises bge-m3;
-the DB-layer tests run when a local Postgres is reachable.
-
-## Run the stack
-
-```powershell
-python -m uvicorn multilingual_rag.api.app:app --host 127.0.0.1 --port 8000
-celery -A multilingual_rag.workers.celery_app.celery_app worker --loglevel=INFO
+# 2. Databases only — the rest you run by hand
+docker compose up -d postgres redis
 alembic upgrade head
-docker compose up --build            # postgres + redis + api + worker
 ```
 
-Endpoints (all under `/v1`, bearer token required except health):
-
-- `GET /healthz` · `GET /readyz`
-- `POST /v1/auth/signup` · `POST /v1/auth/login` · `POST /v1/auth/refresh`
-- `POST /v1/chats` · `GET /v1/chats` · `GET|PATCH|DELETE /v1/chats/{id}` · `POST /v1/chats/{id}/messages`
-- Per-chat documents (M18): `POST /v1/chats/{id}/documents` → `{ "job_id": ... }` (async) ·
-  `GET /v1/chats/{id}/documents` · `DELETE /v1/chats/{id}/documents/{doc_id}` ·
-  `GET /v1/ingestion-jobs/{job_id}`
-- `POST /v1/query`
-
-Example query:
-
-```json
-{ "query": "bharat ki rajdhani kya hai", "top_k": 5 }
-```
-
-The response carries the answer, citations, retrieved chunks, and — when the query was romanized
-Hindi — `transliterated_query` and `transliteration_applied`.
-
-> **Re-index required after upgrading.** Vectors are scoped by `user_id` *and* — since M18 —
-> `session_id` (the chat), so older vectors carry neither and fail closed; and the default
-> embedding model is **bge-m3 (1024-dim)**, not OpenAI (1536-dim) — Chroma rejects a dimension
-> change on an existing collection. Wipe `data/chroma` and re-upload inside a chat, or set
-> `EMBEDDING_PROVIDER=openai` to keep OpenAI embeddings.
-
-## Romanized Hindi queries
-
-`bge-m3` can't retrieve from romanized Hindi — the language signal lives in the script, so a
-Latin-typed query collapses to ~0.20 recall against a native-Devanagari index. The query path
-detects romanized Hindi (distinctly-Hindi function words) and transliterates it to Devanagari
-before embedding, recovering recall to ~0.67 (3.3×) while leaving plain English untouched.
-
-Configured via `TRANSLITERATION_PROVIDER` (`.env`):
-
-- `google` (default) — googletrans; best quality, free, a network call per query, with a local
-  rule-based fallback baked in.
-- `indicxlit` — a local offline neural model (no network).
-- `rule-based` — `indic-transliteration`, instant and offline, lower quality.
-- `llm` — reuse the generation endpoint (costs credits). `off` — disable.
-
-The *detector* is swappable via `TRANSLITERATION_DETECTOR`:
-
-- `word-list` (default) — a fast local function-word check, ~98% recall / 0 false-positives. Hindi only.
-- `muril` — a frozen `google/muril-base-cased` feature extractor + a committed **multinomial**
-  LogisticRegression head (`scripts/train_romanized_detector.py`) classifying **hi/kn/te**. Fully
-  **local** (no network), lazy on CPU, word-list fallback. Set `TRANSLITERATION_LANGUAGES=hi,kn,te`.
-- `google` — googletrans `detect()`, also hi/kn/te, but a network call per query.
-
-Both multi-language detectors are validated (Wikipedia-derived eval,
-`scripts/build_indic_romanized_eval.py`): kn/te romanized→native recovery ~0.59→~0.97, 0 English
-false-positives. Opt-in — the default stays Hindi/word-list (no model, no network).
-
-Design details in `docs/architecture.md §1.5b`; the motivating spike in `docs/indic-romanized-spike.md`.
-
-## Evaluation
+Then, in **separate terminals**:
 
 ```powershell
-# Fixture mode: score a precomputed JSONL dataset.
-python -m multilingual_rag.evaluation.run data/eval/sample_qa.jsonl --k 2
+python -m uvicorn multilingual_rag.api.app:app --port 8000    # the API
+celery -A multilingual_rag.workers.celery_app.celery_app worker --pool=solo   # processes uploads
+cd frontend; npm install; npm run dev                          # the web app
+```
 
-# Live mode: the real pipeline (bge-m3 + Chroma) over the XQuAD corpus — free, no API calls.
+> ⚠️ **Don't skip the worker.** Without it, uploads sit in "queued" forever with no error — the
+> single most confusing failure mode in this project.
+
+### Checks
+
+All three must pass; CI runs them on every push:
+
+```powershell
+python -m pytest              # ~160 tests
+python -m ruff check .        # style + lint (--fix to autofix)
+python -m mypy src            # type checking, strict mode
+```
+
+Two test groups are skipped unless available: model tests (`RUN_MODEL_TESTS=1`) and database tests
+(run automatically when Postgres is reachable).
+
+### Measuring quality
+
+Retrieval quality is measured, not guessed. The harness runs the real pipeline over a public
+multilingual question-answering dataset and is free to run — no API calls:
+
+```powershell
+# Score retrieval across languages (recall, MRR, nDCG)
 python -m multilingual_rag.evaluation.run --live --langs en zh --k 5
-# --sample N caps distractors/queries per language for a fast smoke run (inflates recall).
 
-# Romanized-Hindi eval: native / romanized-raw / transliterated / shipped conditions.
+# Specifically test the romanized-Hindi path
 python scripts/eval_romanized.py --sample 150
-
-# Regenerate the eval corpus (pinned dataset revisions, byte-identical).
-python scripts/build_eval_corpus.py
 ```
 
-## Docker & smoke test
+---
 
-```powershell
-docker compose up --build
-python scripts/smoke_test.py --base-url http://127.0.0.1:8000
+## API
+
+Everything sits under `/v1` and needs a login token except the health checks.
+
+| Purpose | Endpoint |
+|---|---|
+| Health / readiness | `GET /healthz` · `GET /readyz` |
+| Accounts | `POST /v1/auth/signup` · `/login` · `/refresh` |
+| Conversations | `POST GET /v1/chats` · `GET PATCH DELETE /v1/chats/{id}` |
+| Send a message | `POST /v1/chats/{id}/messages` |
+| Files in a chat | `POST GET /v1/chats/{id}/documents` · `DELETE .../{doc_id}` |
+| Upload progress | `GET /v1/ingestion-jobs/{job_id}` |
+| One-off search | `POST /v1/query` |
+
+A query like `{ "query": "bharat ki rajdhani kya hai", "top_k": 5 }` returns the answer, its
+citations, the passages used, and — for romanized input — the converted form so you can see what
+was actually searched.
+
+---
+
+## Project layout
+
+```text
+src/multilingual_rag/
+  api/          HTTP endpoints
+  chat/         conversations and messages
+  ingestion/    reading files, splitting into passages
+  embeddings/   turning text into vectors (bge-m3, OpenAI)
+  vectorstores/ the search index (ChromaDB)
+  retrieval/    finding relevant passages for a question
+  generation/   prompting the model, parsing citations
+  transliteration/  romanized Hindi/Kannada/Telugu handling
+  evaluation/   quality measurement
+frontend/       Next.js web app
+docs/           architecture, decisions, experiment write-ups
 ```
 
-## Run the whole stack (Docker)
+**Built with:** Python 3.13 · FastAPI · Postgres · Redis · Celery · ChromaDB · sentence-transformers
+· Next.js 16 · React 19 · Tailwind
 
-One command runs Postgres, Redis, the API, the ingestion **worker**, and the frontend:
+The codebase follows a **ports-and-adapters** structure: every external system (the vector database,
+the embedding model, the language model) sits behind an interface. That's why swapping providers is
+a config change, and why tests can run without a database or a 2 GB model.
+
+---
+
+## Deploying
+
+The same `docker compose up --build` works on a server. Before exposing it publicly:
 
 ```bash
-cp .env.example .env          # set GENERATION_API_KEY for chat answers
-docker compose up --build
+ENVIRONMENT=production
+JWT_SECRET_KEY=<a long random string>   # python -c "import secrets; print(secrets.token_urlsafe(48))"
+CORS_ALLOW_ORIGINS=https://your-domain.com
 ```
 
-- Frontend → http://localhost:3000 · API → http://localhost:8000
-- The API applies migrations on boot; the **worker** handles document ingestion (so it's never
-  forgotten — ingestion silently stalls without it).
-- For staging/production set `ENVIRONMENT=production` and a strong `JWT_SECRET_KEY`
-  (`python -c "import secrets; print(secrets.token_urlsafe(48))"`) — the app refuses to boot otherwise.
+The app **refuses to start** in production with a weak or default secret — a deliberate guard
+against the most common deployment mistake.
 
-## Documentation
+> **Upgrading from an older version?** You'll need to re-upload documents. Stored vectors are tagged
+> with both a user and a chat, and older ones lack those tags, so they're ignored by design. Clear
+> `data/chroma` and re-upload inside a chat.
 
-- `docs/architecture.md` — HLD/LLD, request flows, known defects.
-- `docs/progress.md` — what's done and what's next.
-- `docs/skills.md` — the technical domains and repo-specific gotchas.
-- `docs/m0/report.md` — the cross-lingual embedding spike (why bge-m3).
-- `docs/indic-romanized-spike.md` — the romanized-Hindi spike.
+---
+
+## Learn more
+
+| Document | What's in it |
+|---|---|
+| [`docs/architecture.md`](docs/architecture.md) | System design, request flows, every bug found and how it was fixed |
+| [`docs/progress.md`](docs/progress.md) | What's built, in what order, and why |
+| [`docs/m0/report.md`](docs/m0/report.md) | The experiment behind choosing bge-m3 |
+| [`docs/indic-romanized-spike.md`](docs/indic-romanized-spike.md) | The romanized-Hindi investigation |
+| [`docs/skills.md`](docs/skills.md) | Technical background and project-specific gotchas |
