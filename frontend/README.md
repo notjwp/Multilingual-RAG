@@ -1,36 +1,60 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Frontend — Multilingual RAG
 
-## Getting Started
+The chat UI: multi-session chat with persisted history, token-by-token streaming answers,
+markdown + inline citations, and per-chat document uploads.
 
-First, run the development server:
+Next.js 16 (App Router) · React 19 · Tailwind v4 · [Base UI](https://base-ui.com) (shadcn
+`base-nova` style, **not** Radix) · Poppins headings / Lato body.
+
+## Run it
+
+The backend must be running first (API on `:8000`, plus Postgres, Redis, and the Celery worker —
+see the root README). Then:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run dev            # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Set `NEXT_PUBLIC_API_BASE_URL` in `.env.local` if the API isn't at `http://localhost:8000`. It is
+baked into the client bundle at build time, so it must be the URL the **browser** uses.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Or run the whole stack (Postgres · Redis · API · worker · frontend) with one command from the repo
+root: `docker compose up --build`.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Verify
 
-## Learn More
+```bash
+npm run lint
+npm run build
+```
 
-To learn more about Next.js, take a look at the following resources:
+Both run in CI on every push.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Layout
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```text
+app/(app)/          authenticated shell — chat routes
+app/login, /signup  auth pages
+components/chat/    chat window, composer (+ paperclip upload), sidebar, message bubbles, files dialog
+components/ui/      Base UI primitives (button, dialog, sheet, …)
+lib/api.ts          typed API client — the one place that talks to the backend
+lib/sse.ts          SSE consumer (fetch + ReadableStream; EventSource can't send auth headers)
+lib/auth.tsx        auth context, token storage, background refresh
+lib/chats.tsx       chat list state
+```
 
-## Deploy on Vercel
+## Gotchas
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- **Auth is a Bearer token in `localStorage`** (`mrag_token`), refreshed in the background via
+  `/v1/auth/refresh`. `lib/api.ts` is the only module that touches it.
+- **Streaming can't use `EventSource`** — it can't POST or set an `Authorization` header, so
+  `lib/sse.ts` reads the response stream manually and parses SSE frames.
+- **Documents are per chat.** Upload from the paperclip in the composer; a file grounds only that
+  chat. There is no global documents page.
+- **Base UI, not Radix.** Custom triggers use `render={<Button/>}`; dialogs are controlled via
+  `open` / `onOpenChange`.
+- After deleting or moving a route, a stale `.next/dev/types` validator can fail the build —
+  `rm -rf .next` and rebuild.
+- See `AGENTS.md`: this Next.js version has breaking changes; check `node_modules/next/dist/docs/`
+  before relying on older Next patterns.

@@ -1,11 +1,21 @@
 # Multilingual RAG
 
-A multilingual retrieval-augmented generation pipeline (Python 3.13, FastAPI, ChromaDB) that
-runs **free by default** — local `bge-m3` embeddings and a free OpenAI-compatible generation
-endpoint (NVIDIA NIM), no paid API required. Ports-and-adapters throughout, `mypy --strict`.
+A multilingual **chat app over your own documents** — ask questions in any language and get
+grounded, cited answers, streamed token-by-token. Python 3.13 · FastAPI · ChromaDB backend with a
+Next.js web UI, and it runs **free by default** — local `bge-m3` embeddings and a free
+OpenAI-compatible generation endpoint (NVIDIA NIM), no paid API required. Ports-and-adapters
+throughout, `mypy --strict`.
 
 ## Features
 
+- **Chat UI, streaming.** A ChatGPT-style web app (`frontend/`): multi-session chat with persisted
+  history, token-by-token SSE streaming, markdown + inline citations, ⌘K command palette, and
+  light/dark themes.
+- **Documents are per chat.** Upload a file *into a chat* (paperclip, left of the message box) and
+  it grounds only *that* chat's answers — invisible to every other chat. Deleting a chat deletes
+  its documents.
+- **Follow-up questions work.** Multi-turn context: a follow-up is condensed into a standalone
+  query for retrieval, while the answer keeps the conversation's thread.
 - **Free, local-first core.** Default embeddings are `bge-m3` (local, 1024-dim, strong
   cross-lingual retrieval); generation targets any OpenAI-compatible endpoint (NVIDIA NIM by
   default) — switching providers is a URL change, not code.
@@ -23,9 +33,11 @@ endpoint (NVIDIA NIM), no paid API required. Ports-and-adapters throughout, `myp
 
 ## Stack
 
-Python 3.13 · FastAPI · Pydantic v2 · SQLAlchemy 2 (async) + Alembic · Postgres · Celery + Redis
-· ChromaDB · `sentence-transformers` (bge-m3) · `googletrans` + `indic-transliteration`
-(romanized-Hindi) · pytest / ruff / mypy.
+**Backend:** Python 3.13 · FastAPI · Pydantic v2 · SQLAlchemy 2 (async) + Alembic · Postgres ·
+Celery + Redis · ChromaDB · `sentence-transformers` (bge-m3) · `googletrans` +
+`indic-transliteration` (romanized-Hindi) · pytest / ruff / mypy.
+
+**Frontend:** Next.js 16 (App Router) · React 19 · Tailwind v4 · Base UI.
 
 ## Local setup
 
@@ -79,10 +91,11 @@ Example query:
 The response carries the answer, citations, retrieved chunks, and — when the query was romanized
 Hindi — `transliterated_query` and `transliteration_applied`.
 
-> **Re-index required after upgrading.** Vectors are scoped by `user_id` (older vectors carry
-> none and fail closed), and the default embedding model is **bge-m3 (1024-dim)**, not OpenAI
-> (1536-dim) — Chroma rejects a dimension change on an existing collection. Wipe `data/chroma`
-> and re-ingest, or set `EMBEDDING_PROVIDER=openai` to keep OpenAI embeddings.
+> **Re-index required after upgrading.** Vectors are scoped by `user_id` *and* — since M18 —
+> `session_id` (the chat), so older vectors carry neither and fail closed; and the default
+> embedding model is **bge-m3 (1024-dim)**, not OpenAI (1536-dim) — Chroma rejects a dimension
+> change on an existing collection. Wipe `data/chroma` and re-upload inside a chat, or set
+> `EMBEDDING_PROVIDER=openai` to keep OpenAI embeddings.
 
 ## Romanized Hindi queries
 

@@ -2,13 +2,18 @@
 
 Working reference for where this project stands. Updated as work lands.
 
-**Last updated:** 2026-07-20
-**Current decision:** Fix-in-place (Phases A–D). Rebuild rejected on evidence.
-**Status:** Phases A, B, C, C4, D all ✅. Romanized query-path ✅ — Hindi (default) + opt-in
-Kannada/Telugu via a **local multi-class MuRIL detector** (no per-query network) or the google
-detector.
-**Next candidates (none started):** MuRIL-for-retrieval; the two Phase-D deferrals (Chroma server
-mode, torch-image slimming).
+**Last updated:** 2026-07-25
+**Current decision:** Fix-in-place (Phases A–D) ✅ complete, then product build-out (M14–M18) ✅
+complete. Rebuild rejected on evidence.
+**Status:** The roadmap is **functionally complete and hardened**. Phases A, B, C, C4, D all ✅.
+Romanized query-path ✅ — Hindi (default) + opt-in Kannada/Telugu via a **local multi-class MuRIL
+detector** (no per-query network) or the google detector. Product layer ✅ — persisted chat (M14),
+SSE streaming + multi-turn context (M15), Next.js frontend (M16), production hardening + CI (M17),
+**per-chat documents** (M18). The embedded-Chroma multi-process defect — the last known technical
+debt — is **fixed** (reload-on-change); the FAISS store added for it was removed as redundant.
+**No open bugs or known technical debt.**
+**Next candidates (none started, all optional):** MuRIL-for-retrieval; torch-image slimming;
+hybrid BM25 + reranking.
 
 ---
 
@@ -29,6 +34,13 @@ mode, torch-image slimming).
 | — | Indic romanized query-path (Hindi) | ✅ **DONE** — detect→transliterate; romanized recall 0.20→0.67 (3.3×), English untouched, live-verified |
 | — | Kannada/Telugu (detect-the-language) | ✅ **DONE** — google `detect()` routes per-language; validated kn 0.963, te 0.925, 0% English FP; opt-in |
 | — | Local multi-class MuRIL detector | ✅ **DONE** — frozen MuRIL + multinomial LR (hi/kn/te/other); held-out hi 1.0 / kn 0.987 / te 0.920, 0 FP; shipped kn 0.963 / te 0.975, no per-query network |
+| M14 | Chat session management | ✅ **DONE** — persisted multi-session chat (sessions · messages · citations) |
+| M15 | Streaming chat (SSE) | ✅ **DONE** — token-by-token answers over SSE + CORS; live-verified |
+| — | Multi-turn conversation context | ✅ **DONE** — history-aware answers + LLM query-rewrite (condense) before retrieval |
+| M16 | Frontend (Next.js mini-ChatGPT) | ✅ **DONE** — Parts 0–6: auth, streaming chat window, markdown + citations, docs UI, responsive drawer, ⌘K palette, shortcuts |
+| M17 | Production hardening | ✅ **DONE** — strong-secret validation, `/v1/auth/refresh`, security headers, full-stack Docker Compose (+ frontend image), GitHub Actions CI |
+| M18 | Per-chat documents | ✅ **DONE** — documents scoped to a single chat (`session_id` through schema/vector store/retrieval); live-verified A-cites / B-doesn't; global `/v1/documents` removed |
+| — | Chroma multi-process fix | ✅ **DONE** — reload-on-change (mtime + `clear_system_cache`); two-process regression test; FAISS store removed as redundant |
 
 ---
 
@@ -65,9 +77,9 @@ cross-tenant data leak.
 
 ---
 
-## Remaining — Fix-in-Place (full plan: `~/.claude/plans/purrfect-bubbling-eich.md`)
+## Fix-in-Place (Phases A–D) — ✅ all complete
 
-Legend: ⬜ todo · 🟡 in progress · ✅ done
+Kept as the build record of how the pipeline was repaired. Legend: ⬜ todo · 🟡 in progress · ✅ done
 
 ### Pre-flight (clear the baseline) ✅
 - ✅ Fixed ruff error — `tests/integration/test_documents_route.py:7` (import wrapped)
@@ -197,8 +209,9 @@ Scoped to C1–C3 (fully offline, no signup/spend); C4 (generation) is its own n
   the model id as an env knob (`GENERATION_MODEL`).
 
 ### Phase D — Correctness + light scale ✅ DONE
-Scoped to correctness + cheap robustness (Chroma server mode + torch-image slimming deferred as
-over-engineering for one machine). Sequenced tests-first so they exposed the bugs before fixing.
+Scoped to correctness + cheap robustness (Chroma server mode + torch-image slimming deferred at the
+time as over-engineering for one machine — the multi-process issue was later fixed in-process, see
+below). Sequenced tests-first so they exposed the bugs before fixing.
 - ✅ D9 DB-layer tests against **real Postgres** (`tests/integration/test_db_layer.py`, gated —
   skip if Postgres unreachable; added `pytest-asyncio`). The coverage that was missing; wrote
   bug-pinning tests RED, then fixed to green. Also the first-ever `run_ingestion_job` test.
@@ -220,7 +233,10 @@ over-engineering for one machine). Sequenced tests-first so they exposed the bug
 - ✅ D3 memoize the query service on `app.state` (built once, not per request; lazy so the offline
   suite never loads the 2.2 GB model at startup).
 - ✅ Gates green throughout; 87 passed with `RUN_MODEL_TESTS=1`. Eval unchanged (recall@5 0.995 on
-  the sample — retrieval untouched). **Deferred:** Chroma server mode, torch-image slimming.
+  the sample — retrieval untouched). **Deferred at the time:** Chroma server mode, torch-image
+  slimming. → The multi-process concern was later solved *without* a server (reload-on-change, see
+  [Chroma multi-process fix](#chroma-multi-process-fix--last-known-technical-debt)); torch-image
+  slimming remains deferred and cosmetic.
 
 ### Indic romanized query-path — Hindi ✅ DONE
 Users can type Hindi in the Latin alphabet (`bharat ki rajdhani kya hai`) and hit the
@@ -294,6 +310,72 @@ three languages *locally*.
 
 ---
 
+## Product build-out (M14 → M18) ✅ DONE
+
+With the pipeline correct, the work turned to making it a usable product — a "mini-ChatGPT" over
+your own documents. Every milestone kept the three gates green.
+
+### M14 — Chat session management ✅
+- ✅ `chat_sessions` / `messages` / `message_citations` promoted from placeholders to a real
+  persisted layer (`chat/repository.py`, `chat/service.py`), all user-scoped with CASCADE deletes.
+- ✅ CRUD routes + auto-titling a fresh chat from its first message.
+
+### M15 — Streaming chat over SSE ✅
+- ✅ `generation/streaming.py` (`StreamingAnswerGenerator`, async `AsyncOpenAI`) yields `Token`s then
+  a `Done` carrying the assembled grounded answer; `api/routes/chat_stream.py` renders SSE frames.
+- ✅ The sync RAG core is untouched — retrieval is offloaded with `asyncio.to_thread`. Live-verified.
+
+### Multi-turn conversation context ✅
+- ✅ Chosen approach: **LLM query-rewrite (condense)**. A follow-up is rewritten into a standalone
+  query for *retrieval* (`generation/contextualize.py`), while the model answers the user's actual
+  wording with history in the prompt. Applies to both the blocking and streaming paths.
+
+### M16 — Frontend (Next.js mini-ChatGPT) ✅
+- ✅ Parts 0–6 shipped: scaffold + typed API client and SSE consumer, login/signup, streaming chat
+  window, markdown + citation rendering, document UI, responsive mobile drawer, ⌘K command palette,
+  keyboard shortcuts, retry. Next.js 16 (App Router) · React 19 · Tailwind v4 · Base UI.
+- ✅ Typography pass (Poppins headings / Lato body).
+
+### M17 — Production hardening ✅
+- ✅ Auth: rejects a weak/placeholder `JWT_SECRET_KEY` in prod/staging, 30-min tokens, and a
+  `POST /v1/auth/refresh` sliding session (the frontend refreshes ahead of expiry).
+- ✅ Security headers middleware (nosniff, `X-Frame-Options`, Referrer-Policy, HSTS in prod) and a
+  locked-down CORS method/header allow-list.
+- ✅ One-command full stack: `docker compose up --build` runs postgres · redis · api · **worker** ·
+  frontend (the worker is no longer forgettable — ingestion silently stalls without it).
+- ✅ **CI** (GitHub Actions): backend job (Postgres + Redis services → ruff · mypy · pytest) and a
+  frontend job (npm ci · lint · build). Gates every push.
+- ✅ Embedding warm-up at startup + optional `HF_HUB_OFFLINE`.
+- Decision: auth stays **Bearer + localStorage** (hardened), not httpOnly cookies. Rate limiting
+  deliberately out of scope.
+
+### M18 — Per-chat documents ✅
+- ✅ Documents are scoped to a **single chat**, not the whole user: a file uploaded into a chat
+  grounds only *that* chat's answers and is invisible to every other chat.
+- ✅ `session_id` threaded end-to-end: nullable FK on `documents`/`ingestion_jobs`
+  (`ondelete=CASCADE`, migration `0005`), dedup widened to `(user_id, session_id, checksum)`,
+  content-addressed `document_id` folds in `session_id`, `VectorStore` methods take `session_id`,
+  and retrieval → `answer` / `stream` pass the chat id.
+- ✅ Routes moved to `POST|GET /v1/chats/{id}/documents` + `DELETE .../{doc_id}` (ownership-checked);
+  the global `/v1/documents` route and the frontend `/documents` page were removed. Upload now lives
+  in the composer (paperclip, left of the message box).
+- ✅ **Live-verified end-to-end** (real API + worker + LLM): chat A answered *"…Vexmoor on 14 March
+  1991"* citing its document; chat B — same user, same question — returned **no citations** and
+  didn't know the fact. Citations come only from retrieved chunks, so that is proof of scoping.
+
+### Chroma multi-process fix ✅ (last known technical debt)
+- ✅ **Reproduced first**, not assumed: a two-process test showed a reader whose client predated a
+  separate writer process's upsert **silently** returned only its own row (on the Rust-core Chroma
+  this is wrong results, not always the "Error finding id" exception).
+- ✅ **Fixed in `ChromaVectorStore`** with *reload-on-change*: track the persist dir's newest mtime
+  and, when it advances, clear Chroma's process-wide client cache and reopen — all ops serialized
+  under a lock so a reopen never races an in-flight query. No Chroma server, no extra container.
+- ✅ Regression test `tests/integration/test_chroma_multiprocess.py` drives a real second process.
+- ✅ The **FAISS** store (added earlier as a workaround) was **removed** as redundant — embedded
+  ChromaDB is the only backend again (`faiss-cpu`/`filelock` deps and the `VECTOR_STORE` setting gone).
+
+---
+
 ## Standing invariants (don't regress)
 
 - All three gates green each phase: `pytest` · `ruff check .` · `mypy src`.
@@ -305,8 +387,10 @@ three languages *locally*.
 
 ## Open questions / deferred
 
-- Generation provider final choice (OpenRouter vs Groq) — Groq's free Llama omits Chinese;
-  leaning OpenRouter Qwen2.5-72B. Decide at C4.
+- ✅ **Resolved** — generation provider: any OpenAI-compatible endpoint, **NVIDIA NIM** by default
+  (free tier, no card). Swapping providers is a URL change, not code.
 - Free-tier rate limits constrain the faithfulness judge → sample, don't judge all 1190.
 - Japanese not covered by the M0 corpus (XQuAD has no `ja`); revisit if needed.
 - Hybrid BM25 + reranking deferred (bge-m3's dense recall made it unnecessary for now).
+- torch-image slimming (the Docker image carries torch for local bge-m3) — deferred, cosmetic.
+- MuRIL-for-retrieval (vs detection only) — never started; optional.

@@ -78,10 +78,13 @@ a worker locally.
 - Embedded `PersistentClient`, **cosine** space, `score = 1.0 - distance`.
 - Metadata must be **flat scalars**; custom fields are `meta_`-prefixed on write, unwrapped on
   read (`chroma_store.py`).
-- Filtering uses Mongo-style `where` clauses (`$and`, equality) — Phase A adds server-side
-  `user_id` scoping this way.
-- Embedded Chroma is **not safe for concurrent multi-process writers** (server mode deferred as
-  over-engineering for one machine).
+- Filtering uses Mongo-style `where` clauses (`$and`, equality) — `user_id` (Phase A) and
+  `session_id` (M18, per-chat documents) scoping are both enforced this way.
+- Embedded Chroma caches index segments **per process**, so a client opened before another process
+  writes serves stale results (silent misses, or "Error finding id"). `ChromaVectorStore` handles
+  this with **reload-on-change**: track the persist dir's newest mtime and, when it advances, clear
+  Chroma's process-wide client cache and reopen. A lesson: "it works in one process" is not
+  evidence it works across the api + worker split.
 
 **Learn if unfamiliar:** dense vector retrieval, cosine similarity, ANN vs exact search,
 metadata filtering, embedding dimensions (OpenAI 1536 vs bge-m3 1024 — not interchangeable in

@@ -4,9 +4,9 @@ Retrieval-augmented generation over multilingual documents. A user uploads docum
 language, they are chunked / embedded / indexed, and the user asks questions (in any language)
 and receives grounded, cited answers.
 
-This document describes the system **as it exists today**. Known defects and the planned
-repair are called out explicitly in [§7](#7-known-defects--planned-evolution); do not read the
-current design as the intended end state.
+This document describes the system **as it exists today**. [§7](#7-known-defects--planned-evolution)
+tracks the defects found along the way and how each was repaired — all are now fixed; the table is
+kept as the record. Status per milestone lives in `docs/progress.md`.
 
 ---
 
@@ -73,26 +73,35 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    C[Client] -->|POST /v1/documents/upload| U[documents route]
+    C[Client] -->|POST /v1/chats/id/documents| U[chat_documents route]
+    U -->|verify chat ownership| PG[(PostgreSQL)]
     U -->|save bytes| RAW[(raw_document_directory)]
-    U -->|queued job row| PG[(PostgreSQL)]
+    U -->|queued job row + session_id| PG
     U -->|enqueue| RQ[(Redis)]
     U -->|job_id| C
     RQ --> W[Celery worker]
-    W --> ING[ingest → embed → Chroma upsert]
+    W --> ING[ingest → embed → Chroma upsert scoped by user_id + session_id]
     W -->|documents / document_chunks rows| PG
     C -->|poll GET /v1/ingestion-jobs/id| PG
 ```
 
-The upload endpoint does **not** index inline. It saves bytes, writes a `queued` job, enqueues
-Celery, and returns a `job_id`. The worker runs `documents/jobs.py::run_ingestion_job`. Clients
-poll `GET /v1/ingestion-jobs/{job_id}`.
+The upload endpoint does **not** index inline. It verifies the caller owns the chat, saves bytes,
+writes a `queued` job scoped to that chat, enqueues Celery, and returns a `job_id`. The worker runs
+`documents/jobs.py::run_ingestion_job`. Clients poll `GET /v1/ingestion-jobs/{job_id}`.
 
-### 1.4 One document path
+### 1.4 One document path, scoped per chat
 
-`DatabaseDocumentIndexingService` (PostgreSQL + Celery, per-`user_id`) is the only path. The
-legacy `DocumentIndexingService` + `DocumentStore` (an unscoped JSON file) was removed in Phase D
-(D8) — a single source of truth, no drift.
+`DatabaseDocumentIndexingService` (PostgreSQL + Celery) is the only path. The legacy
+`DocumentIndexingService` + `DocumentStore` (an unscoped JSON file) was removed in Phase D (D8) —
+a single source of truth, no drift.
+
+Since **M18** documents belong to a **single chat**, not the whole user: a file uploaded into a chat
+grounds only *that* chat's answers. `documents` / `ingestion_jobs` carry a nullable `session_id` FK
+(`ondelete=CASCADE`, so deleting a chat drops its documents), dedup is `(user_id, session_id,
+checksum)`, and the content-addressed `document_id` folds in `session_id`. The `session_id` threads
+through the vector store and retrieval → `RagQueryService.answer` / `StreamingAnswerGenerator.stream`,
+so a chat retrieves only its own chunks. There is no user-wide document library and no global
+`/v1/documents` route.
 
 ### 1.5 Identity & tenancy
 
@@ -157,11 +166,14 @@ transliterate → search** step in `RetrievalService.retrieve`:
 
 - **Python 3.13**, FastAPI, Pydantic v2 (+ pydantic-settings)
 - **PostgreSQL** via SQLAlchemy 2.x async + asyncpg; migrations by **Alembic**
-- **ChromaDB** (embedded `PersistentClient`, cosine) — the vector store
+- **ChromaDB** (embedded `PersistentClient`, cosine) — the only vector store
 - **Redis** + **Celery** — async ingestion broker/result backend
-- **OpenAI** — embeddings (`text-embedding-3-small`) and generation (`gpt-4.1-mini`)
+- **bge-m3** (local, 1024-dim) — default embeddings; OpenAI embeddings stay available behind config
+- **Any OpenAI-compatible chat endpoint** — generation (NVIDIA NIM by default, free tier)
+- **Next.js 16** (App Router, React 19, Tailwind v4) — the frontend (`frontend/`)
 - **langdetect** — language detection
-- Verification: pytest, ruff (line length 100), mypy `strict`
+- Verification: pytest, ruff (line length 100), mypy `strict`; GitHub Actions CI runs all three
+  plus the frontend lint/build
 
 ---
 
@@ -171,7 +183,8 @@ transliterate → search** step in `RetrievalService.retrieve`:
 api/          HTTP boundary
   app.py                 create_app() factory; single AppError→ErrorResponse handler
   schemas.py             ErrorResponse
-  routes/                health · auth · documents (+ jobs_router) · query
+  routes/                health · auth · query · chat · chat_stream (SSE) ·
+                         chat_documents (per-chat upload/list/delete) · documents (jobs_router)
 auth/         identity
   security.py            PBKDF2 hashing, JWT encode/decode
   service.py             signup / login orchestration
@@ -193,8 +206,10 @@ embeddings/   port + adapters + factory
   bge_embeddings.py      local bge-m3 (default); openai_embeddings.py (behind config)
   factory.py             build_embedding_provider
 vectorstores/ port + adapter
-  base.py                VectorStore protocol; MetadataValue / VectorFilter types
-  chroma_store.py        cosine; score = 1.0 - distance; meta_-prefixed custom metadata
+  base.py                VectorStore protocol (user_id + session_id scoped); MetadataValue / VectorFilter
+  chroma_store.py        cosine; score = 1.0 - distance; meta_-prefixed custom metadata;
+                         reload-on-change for multi-process (api + worker) safety
+  factory.py             build_vector_store
 retrieval/    query-time
   service.py             RetrievalService.retrieve → RetrievalContext (detect → transliterate)
   context.py             format_context — numbers chunks [1] [2] … for citation
@@ -358,10 +373,11 @@ tests/                  unit/ · integration/ (no conftest.py)
 
 ---
 
-## 7. Known defects & planned evolution
+## 7. Defects found & how they were fixed
 
-These are documented so the current architecture is not mistaken for the target. The repair is
-the fix-in-place plan (Phases A–D); status is tracked in `docs/progress.md`.
+The build record: every defect found in the audit and since, with its repair (Phases A–D, then the
+product milestones). **All are fixed** — kept so the reasoning isn't lost. Status per milestone is
+tracked in `docs/progress.md`.
 
 | # | Defect (current state) | Fix |
 |---|---|---|
@@ -376,4 +392,4 @@ the fix-in-place plan (Phases A–D); status is tracked in `docs/progress.md`.
 | ~~Data~~ ✅ | ~~`DELETE /v1/documents/{id}` bypasses ORM cascade; no FK `ondelete` → IntegrityError~~ — **fixed in D4**: child FKs are `ondelete=CASCADE` (`SET NULL` on `ingestion_jobs`) + migration `0002`; live DELETE now returns 200 | D ✅ |
 | ~~Data~~ ✅ | ~~Chroma upserted before Postgres → orphan vectors; dedup defeated by uuid4-in-path; file "checksum" hashed the path~~ — **fixed in D5/D6/D7**: DB-first write with compensating vector delete; `document_id = uuid5(user_id:checksum)` + `(user_id, checksum)` unique (migration `0003`); checksum is the content hash | D ✅ |
 | ~~Testing~~ ✅ | ~~DB/worker layer has zero coverage~~ — **fixed in D9**: `tests/integration/test_db_layer.py` exercises repositories + `run_ingestion_job` against real Postgres (gated skip when unreachable); the legacy `DocumentStore` path was deleted in D8 | D ✅ |
-| Runtime | Embedded Chroma shared by api + worker processes (SQLite writer contention) | **Deferred** (over-engineering for one machine; revisit for multi-user deploy) |
+| ~~Runtime~~ ✅ | ~~Embedded Chroma shared by api + worker processes: the API's client caches index segments, so it silently misses (or fails to resolve — "Error finding id") rows the worker wrote~~ — **fixed**: `ChromaVectorStore` reloads on change (tracks the persist dir's newest mtime; on advance clears Chroma's process-wide client cache and reopens, all ops under a lock). Regression test `tests/integration/test_chroma_multiprocess.py` drives a real second process. No Chroma server needed | ✅ |
