@@ -14,9 +14,13 @@ COPY scripts ./scripts
 RUN python -m pip install --upgrade pip \
     && python -m pip install --no-cache-dir .
 
+# The huggingface cache dir must exist AND be owned by appuser in the image: Docker initializes a
+# named volume from the image path it covers, so a missing/root-owned dir yields a root-owned
+# volume and the bge-m3 download dies with PermissionError under USER appuser.
 RUN mkdir -p /app/data \
     && useradd --create-home appuser \
-    && chown -R appuser:appuser /app/data
+    && mkdir -p /home/appuser/.cache/huggingface \
+    && chown -R appuser:appuser /app/data /home/appuser
 USER appuser
 
 EXPOSE 8000

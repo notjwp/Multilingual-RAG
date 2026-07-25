@@ -1,11 +1,18 @@
 """Application configuration loaded from environment variables."""
 
+import contextlib
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# Tuple-valued settings read from env vars are comma-separated strings, not JSON. Without
+# NoDecode, pydantic-settings JSON-decodes complex types *inside the env source* — before any
+# `mode="before"` validator runs — so `CORS_ALLOW_ORIGINS=http://localhost:3000` raises a
+# SettingsError and the app can't boot. NoDecode hands the raw string to _split_comma_separated.
+CommaSeparated = Annotated[tuple[str, ...], NoDecode]
 
 Environment = Literal["local", "test", "staging", "production"]
 
@@ -29,7 +36,7 @@ class Settings(BaseSettings):
 
     # Browser origins allowed to call the API (the M16 frontend + local dev). Accepts a
     # comma-separated env string (CORS_ALLOW_ORIGINS=http://localhost:3000,https://app.example).
-    cors_allow_origins: tuple[str, ...] = ("http://localhost:3000",)
+    cors_allow_origins: CommaSeparated = ("http://localhost:3000",)
 
     # Embedding provider: bge-m3 (local, free) is the default; openai stays available.
     embedding_provider: Literal["bge-m3", "openai"] = "bge-m3"
@@ -61,7 +68,7 @@ class Settings(BaseSettings):
     transliteration_provider: Literal["google", "indicxlit", "rule-based", "llm", "off"] = (
         "google"
     )
-    transliteration_languages: tuple[str, ...] = ("hi",)
+    transliteration_languages: CommaSeparated = ("hi",)
     # How to decide a query is romanized Indic (whether/what to transliterate). "word-list"
     # (default) is Hindi-only. "muril" is a local multi-class classifier (hi/kn/te, ~950 MB model,
     # no network). "google" detects the language via Google Translate (hi/kn/te, a network call per
@@ -99,9 +106,22 @@ class Settings(BaseSettings):
     @field_validator("transliteration_languages", "cors_allow_origins", mode="before")
     @classmethod
     def _split_comma_separated(cls, value: object) -> object:
-        """Accept a comma-separated env string (``hi,kn,te``), not just JSON, for convenience."""
+        """Parse a tuple setting from an env string — comma-separated *or* a JSON list.
+
+        These fields are ``NoDecode``, so the raw env string arrives here undecoded (see
+        ``CommaSeparated``). Comma-separated is the documented form; a JSON list is still
+        accepted so existing deployments that used it keep working.
+        """
         if isinstance(value, str):
-            return tuple(part.strip() for part in value.split(",") if part.strip())
+            text = value.strip()
+            if text.startswith("["):
+                import json
+
+                with contextlib.suppress(ValueError):
+                    parsed = json.loads(text)
+                    if isinstance(parsed, list):
+                        return tuple(str(item).strip() for item in parsed)
+            return tuple(part.strip() for part in text.split(",") if part.strip())
         return value
 
     @field_validator("api_prefix")

@@ -20,29 +20,41 @@ def test_healthz_returns_service_status() -> None:
     }
 
 
-def test_readyz_reports_missing_openai_key() -> None:
-    app = create_app(Settings(environment="test", openai_api_key=None))
-
-    with TestClient(app) as client:
-        response = client.get("/readyz")
-
-    assert response.status_code == 200
-    assert response.json()["ready"] is False
-    assert response.json()["checks"] == {
-        "configuration": True,
-        "openai_api_key_configured": False,
-    }
-
-
-def test_readyz_reports_configured_openai_key() -> None:
-    app = create_app(Settings(environment="test", openai_api_key="test-key"))
+def test_readyz_is_ready_on_the_default_local_stack_without_an_openai_key() -> None:
+    """Regression: the free default (local bge-m3) never calls OpenAI, so a missing OpenAI key
+    must NOT hold readiness down — it reported ready=false forever in the compose deployment."""
+    app = create_app(Settings(environment="test", embedding_provider="bge-m3", openai_api_key=None))
 
     with TestClient(app) as client:
         response = client.get("/readyz")
 
     assert response.status_code == 200
     assert response.json()["ready"] is True
-    assert response.json()["checks"]["openai_api_key_configured"] is True
+    assert response.json()["checks"] == {"configuration": True, "embeddings_configured": True}
+
+
+def test_readyz_reports_missing_openai_key_when_openai_embeddings_are_selected() -> None:
+    app = create_app(Settings(environment="test", embedding_provider="openai", openai_api_key=None))
+
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json()["ready"] is False
+    assert response.json()["checks"]["embeddings_configured"] is False
+
+
+def test_readyz_reports_configured_openai_key() -> None:
+    app = create_app(
+        Settings(environment="test", embedding_provider="openai", openai_api_key="test-key")
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json()["ready"] is True
+    assert response.json()["checks"]["embeddings_configured"] is True
 
 
 def test_app_error_handler_returns_standard_error_response() -> None:

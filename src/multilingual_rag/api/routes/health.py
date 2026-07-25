@@ -21,9 +21,16 @@ async def healthz(request: Request) -> HealthResponse:
 async def readyz(request: Request) -> ReadinessResponse:
     """Return readiness status for dependency-aware startup checks."""
     settings = _get_settings(request)
+    # Only require the OpenAI key when OpenAI embeddings are actually selected. The default stack
+    # (local bge-m3 + an OpenAI-compatible generation endpoint such as NIM) never calls OpenAI, so
+    # gating readiness on that key reported ready=false forever in a correct free deployment.
     checks = {
         "configuration": True,
-        "openai_api_key_configured": settings.openai_api_key is not None,
+        "embeddings_configured": (
+            settings.openai_api_key is not None
+            if settings.embedding_provider == "openai"
+            else True
+        ),
     }
     return ReadinessResponse(
         service=settings.app_name,

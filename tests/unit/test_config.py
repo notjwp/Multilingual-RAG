@@ -62,3 +62,38 @@ def test_weak_jwt_secret_allowed_outside_prod() -> None:
     settings = Settings(environment="local", jwt_secret_key=SecretStr("short"))
     assert settings.jwt_secret_key.get_secret_value() == "short"
 
+
+
+# --- tuple settings from env vars -----------------------------------------------------------
+# Regression: pydantic-settings JSON-decodes complex types inside the env source, *before* any
+# `mode="before"` validator runs. A comma-separated CORS_ALLOW_ORIGINS therefore raised
+# SettingsError and crash-looped the API container in docker compose — caught by the compose
+# smoke test, not by any unit test. The fields are NoDecode-annotated so the raw string reaches
+# the splitter.
+
+
+def test_cors_origins_parsed_from_comma_separated_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "http://localhost:3000,https://app.example.com")
+    settings = Settings(_env_file=None)
+    assert settings.cors_allow_origins == ("http://localhost:3000", "https://app.example.com")
+
+
+def test_single_cors_origin_from_env_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The exact value docker-compose.yml passes — this used to raise SettingsError on boot.
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "http://localhost:3000")
+    assert Settings(_env_file=None).cors_allow_origins == ("http://localhost:3000",)
+
+
+def test_transliteration_languages_from_comma_separated_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The line .env.example documents for enabling Kannada/Telugu.
+    monkeypatch.setenv("TRANSLITERATION_LANGUAGES", "hi,kn,te")
+    assert Settings(_env_file=None).transliteration_languages == ("hi", "kn", "te")
+
+
+def test_tuple_setting_still_accepts_a_json_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", '["http://a.example", "http://b.example"]')
+    assert Settings(_env_file=None).cors_allow_origins == ("http://a.example", "http://b.example")

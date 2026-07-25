@@ -3,10 +3,14 @@ x-backend-env: &backend-env
   APP_NAME: ${APP_NAME:-multilingual-rag}
   ENVIRONMENT: ${ENVIRONMENT:-local}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
-  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/multilingual_rag}
-  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-  CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
-  CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+  # Intra-network addresses — deliberately NOT ${VAR:-default}. Compose interpolates such vars
+  # from the host .env, and a local-dev .env correctly points at localhost, which inside a
+  # container means the container itself (connection refused). Service names are always right
+  # here, so they are pinned; override them with a compose override file if you truly need to.
+  DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/multilingual_rag
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
   JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
   JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
   ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
@@ -17,8 +21,13 @@ x-backend-env: &backend-env
   # Embedded ChromaDB vector store (persisted under /app/data).
   CHROMA_PERSIST_DIRECTORY: ${CHROMA_PERSIST_DIRECTORY:-data/chroma}
   RAW_DOCUMENT_DIRECTORY: ${RAW_DOCUMENT_DIRECTORY:-data/raw}
-  # Set these true once the bge-m3 model is cached in the image/volume (faster, but needs the cache).
-  HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-false}
+  # bge-m3 lives in the shared hf_cache volume, NOT on the host. Pinned (not ${...}) for the same
+  # reason as the URLs above: a local-dev .env sets HF_HUB_OFFLINE=true because the model is cached
+  # on the host, and leaking that in would leave containers unable to fetch it — ingestion then
+  # fails with "couldn't connect to huggingface.co ... and couldn't find them in the cached files".
+  # The first run downloads ~2.2 GB into hf_cache; later runs reuse it.
+  HF_HUB_OFFLINE: "false"
+  HF_HOME: /home/appuser/.cache/huggingface
   WARM_EMBEDDINGS_ON_STARTUP: ${WARM_EMBEDDINGS_ON_STARTUP:-false}
 
 services:
@@ -62,6 +71,8 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
+      # Shared bge-m3 download (~2.2 GB) — fetched once, reused by api + worker and across restarts.
+      - hf_cache:/home/appuser/.cache/huggingface
     healthcheck:
       test: ["CMD", "python", "scripts/smoke_test.py", "--base-url", "http://127.0.0.1:8000"]
       interval: 30s
@@ -81,6 +92,7 @@ services:
       <<: *backend-env
     volumes:
       - ./data:/app/data
+      - hf_cache:/home/appuser/.cache/huggingface
 
   frontend:
     build:
@@ -95,3 +107,4 @@ services:
 
 volumes:
   postgres_data:
+  hf_cache:
