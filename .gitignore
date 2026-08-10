@@ -32,6 +32,9 @@ flow.md
 decision.pdf
 flow.pdf
 
+# Rendered copy of docs/architecture.md (the markdown is the source of truth and IS committed).
+architecture.pdf
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

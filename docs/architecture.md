@@ -1,12 +1,14 @@
 # Architecture — Multilingual RAG
 
 Retrieval-augmented generation over multilingual documents. A user uploads documents in any
-language, they are chunked / embedded / indexed, and the user asks questions (in any language)
-and receives grounded, cited answers.
+language into a chat, asks questions (in any language, including Indian languages typed in the
+Latin alphabet), and receives streamed, grounded, cited answers.
 
-This document describes the system **as it exists today**. [§7](#7-known-defects--planned-evolution)
-tracks the defects found along the way and how each was repaired — all are now fixed; the table is
-kept as the record. Status per milestone lives in `docs/progress.md`.
+This document describes the system **as it exists today**. Milestone status lives in
+`docs/progress.md`; §9 keeps the defect record.
+
+**Reading order if you're new to the codebase:** §1.1 (the one rule) → §1.3 (request flows) →
+§2 (module map) → §4 (why, not just what).
 
 ---
 
@@ -21,24 +23,30 @@ HTTP request
  Route  (api/routes/*)            ← async; validation, auth, response shaping
    │
    ▼
- Service  (retrieval, documents, ingestion, auth)   ← orchestration
+ Service  (retrieval, chat, documents, ingestion, auth)   ← orchestration
    │
    ▼
  Protocol-typed adapter          ← the only thing that talks to an external system
    │
    ▼
- External:  OpenAI · ChromaDB · PostgreSQL · Redis
+ External:  bge-m3 · ChromaDB · OpenAI-compatible LLM · PostgreSQL · Redis
 ```
 
-Every external system is reached through a `Protocol` "port"; concrete "adapters" implement
-it. Services receive ports by keyword-only constructor injection and never import an adapter
-directly. This is what makes the embedding-model swap (OpenAI → bge-m3) a one-adapter change.
+Every external system is reached through a `Protocol` "port"; concrete "adapters" implement it.
+Services receive ports by keyword-only constructor injection and **never import an adapter
+directly**. That is what made the embedding swap (OpenAI → bge-m3) a one-adapter change, and what
+lets tests pass plain fakes with no mocking library.
 
-| Port (`Protocol`) | File | Adapter |
-|---|---|---|
-| `EmbeddingProvider` | `embeddings/base.py` | `OpenAIEmbeddingProvider` |
-| `VectorStore` | `vectorstores/base.py` | `ChromaVectorStore` |
-| `AnswerGenerator` | `generation/base.py` | `OpenAIAnswerGenerator` |
+| Port (`Protocol`) | Defined in | Adapters | Factory |
+| --- | --- | --- | --- |
+| `EmbeddingProvider` | `embeddings/base.py` | `BgeM3EmbeddingProvider` **(default)**, `OpenAIEmbeddingProvider` | `embeddings/factory.py` |
+| `VectorStore` | `vectorstores/base.py` | `ChromaVectorStore` | `vectorstores/factory.py` |
+| `AnswerGenerator` | `generation/base.py` | `OpenAICompatibleAnswerGenerator` | constructed in the query route |
+| `Transliterator` | `transliteration/base.py` | `google` **(default)**, `indicxlit`, `rule-based`, `llm` | `transliteration/factory.py` |
+
+Each factory selects its adapter from `Settings` and imports it **lazily**, so a module that never
+builds a vector store never pulls in `chromadb`, and the offline test suite never loads the 2.2 GB
+embedding model.
 
 ### 1.2 Sync core, async edge
 
@@ -46,30 +54,62 @@ The entire RAG core — ingestion, chunking, embedding, vector I/O, retrieval, g
 **synchronous**. Only the API, the DB session, and the repository layer are `async`.
 
 - `RagQueryService.answer_query` is a **sync** method called from an **async** route.
-- The Celery worker bridges back to async with `asyncio.run()` (`workers/celery_app.py:25`).
+- The Celery worker bridges back to async with `asyncio.run()` (`workers/celery_app.py`).
 
-> This is a deliberate choice: the core stays sync (local models + a sync generation client can't
-> be truly async). Phase D (D1) stopped it blocking the event loop by offloading the whole call
-> via `await asyncio.to_thread(...)` in the query route, so concurrent queries no longer serialize
-> — the "sync core, async edge" split is preserved rather than rewritten.
+**Why:** local model inference and the sync OpenAI client are genuinely blocking. Marking them
+`async` would be a lie that stalls the event loop. So the blocking work is offloaded *explicitly*:
+
+| Call site | Bridge |
+| --- | --- |
+| `api/routes/query.py` | `await asyncio.to_thread(query_service.answer_query, …)` |
+| `chat/service.py::send_message` | `await asyncio.to_thread(self.query_service.answer, …)` |
+| `generation/streaming.py::stream` | `await asyncio.to_thread(retrieval_service.retrieve, …)` |
+| `workers/celery_app.py` | `asyncio.run(...)` — async → sync direction |
+
+Streaming is the one exception that is *natively* async: `StreamingAnswerGenerator` uses
+`openai.AsyncOpenAI`, because a token stream is real I/O. Retrieval inside it is still offloaded.
+
+**Rule for new code:** keep core logic sync; keep `async` at the HTTP/DB boundary.
 
 ### 1.3 Request flows
 
-**Query (synchronous RAG):**
+#### Query (blocking RAG) — `POST /v1/query`
 
 ```mermaid
 flowchart LR
     C[Client] -->|POST /v1/query| Q[query route]
-    Q --> RS[RagQueryService]
+    Q -->|asyncio.to_thread| RS[RagQueryService]
     RS --> RET[RetrievalService]
-    RET --> EMB[EmbeddingProvider]
+    RET --> DET[detect romanized Indic?]
+    DET --> EMB[EmbeddingProvider / bge-m3]
     RET --> VS[VectorStore / Chroma]
     RS --> GEN[AnswerGenerator]
-    GEN --> LLM[OpenAI]
+    GEN --> LLM[OpenAI-compatible endpoint]
     RS -->|answer + citations + chunks| C
 ```
 
-**Upload (asynchronous ingestion):**
+#### Chat message, streamed — `POST /v1/chats/{id}/messages/stream`
+
+```mermaid
+flowchart TD
+    C[Client] -->|POST .../messages/stream| R[chat_stream route]
+    R -->|verify ownership BEFORE streaming| PG[(PostgreSQL)]
+    R --> CS[ChatService.stream_message]
+    CS -->|load recent history| PG
+    CS -->|persist user turn| PG
+    CS --> SG[StreamingAnswerGenerator]
+    SG -->|condense follow-up| LLM[LLM]
+    SG -->|to_thread| RET[RetrievalService scoped by user + session]
+    SG -->|Token deltas| C
+    SG -->|Done: assembled answer| CS
+    CS -->|persist assistant turn + citations| PG
+    CS -->|event: done| C
+```
+
+Ownership is verified **before** the `StreamingResponse` opens — once headers are sent, a failure
+can only be reported as an SSE `error` event, not an HTTP status.
+
+#### Upload (asynchronous ingestion) — `POST /v1/chats/{id}/documents`
 
 ```mermaid
 flowchart LR
@@ -85,93 +125,141 @@ flowchart LR
     C -->|poll GET /v1/ingestion-jobs/id| PG
 ```
 
-The upload endpoint does **not** index inline. It verifies the caller owns the chat, saves bytes,
-writes a `queued` job scoped to that chat, enqueues Celery, and returns a `job_id`. The worker runs
+The upload endpoint does **not** index inline. It verifies chat ownership, reads at most
+`max_upload_bytes + 1` (so nothing oversized ever enters memory), saves bytes, writes a `queued`
+job scoped to that chat, enqueues Celery, and returns a `job_id`. The worker runs
 `documents/jobs.py::run_ingestion_job`. Clients poll `GET /v1/ingestion-jobs/{job_id}`.
+
+**Write ordering inside the job** — DB rows → vectors → **one** commit. On failure: rollback,
+best-effort delete of any vectors that landed, mark the job failed. This keeps Postgres and Chroma
+from drifting into orphan-vectors or document-without-vectors.
+
+> **Subtlety:** `user_id`, `session_id`, and `file_path` are captured into plain locals *before*
+> any rollback. A rolled-back ORM object can't be lazily re-read under async SQLAlchemy, and the
+> cleanup path needs those values — the D5 test caught this silently no-op'ing.
 
 ### 1.4 One document path, scoped per chat
 
 `DatabaseDocumentIndexingService` (PostgreSQL + Celery) is the only path. The legacy
-`DocumentIndexingService` + `DocumentStore` (an unscoped JSON file) was removed in Phase D (D8) —
-a single source of truth, no drift.
+`DocumentIndexingService` + `DocumentStore` (an unscoped JSON file) was removed in Phase D — a
+single source of truth, no drift.
 
-Since **M18** documents belong to a **single chat**, not the whole user: a file uploaded into a chat
-grounds only *that* chat's answers. `documents` / `ingestion_jobs` carry a nullable `session_id` FK
-(`ondelete=CASCADE`, so deleting a chat drops its documents), dedup is `(user_id, session_id,
-checksum)`, and the content-addressed `document_id` folds in `session_id`. The `session_id` threads
-through the vector store and retrieval → `RagQueryService.answer` / `StreamingAnswerGenerator.stream`,
-so a chat retrieves only its own chunks. There is no user-wide document library and no global
-`/v1/documents` route.
+Since **M18** documents belong to a **single chat**, not the whole user: a file uploaded into a
+chat grounds only *that* chat's answers.
+
+- `documents` / `ingestion_jobs` carry a nullable `session_id` FK (`ondelete=CASCADE`, so deleting
+  a chat drops its documents)
+- dedup constraint is `(user_id, session_id, checksum)`
+- the content-addressed `document_id` folds in `session_id`
+- `session_id` threads through the `VectorStore` methods and retrieval →
+  `RagQueryService.answer` / `StreamingAnswerGenerator.stream`
+
+There is no user-wide document library and no global `/v1/documents` route.
+
+**How it was verified:** chat A answered citing its uploaded document; chat B — same user, same
+question — returned **no citations** and didn't know the fact. Citations come only from retrieved
+chunks, so that is proof of scoping rather than an assumption.
 
 ### 1.5 Identity & tenancy
 
 JWT bearer via `auth/dependencies.py::get_current_user`. Password hashing is hand-rolled
-PBKDF2-HMAC-SHA256 in `auth/security.py` (format `pbkdf2_sha256$iterations$salt$digest`,
-310k iterations, `hmac.compare_digest`) — no passlib.
+PBKDF2-HMAC-SHA256 in `auth/security.py` (format `pbkdf2_sha256$iterations$salt$digest`, 310k
+iterations, `hmac.compare_digest`) — no passlib. Access tokens are short-lived (30 min) with a
+`POST /v1/auth/refresh` sliding session.
 
-**Tenancy (Phase A).** `/v1/query` requires authentication, and `user_id` is a required
-keyword-only argument on the `VectorStore` protocol (`upsert_chunks`/`search`/`delete_document`)
-— a forgotten call site is a mypy error, not a silent leak. `ChromaVectorStore` scopes search
-with `{"$and": [{"user_id": …}, <client filters>]}` (un-widenable), namespaces storage ids as
-`{user_id}:{chunk_id}` so identical cross-user uploads don't collide, and rejects a client
-`user_id` filter (`reserved_filter_key`). Phase D (D6) added content-addressed dedup on top:
-`document_id = uuid5(NAMESPACE_URL, f"{user_id}:{checksum}")` with a `(user_id, checksum)` unique
-constraint, so a user re-uploading identical content updates in place instead of duplicating.
+**Tenancy is enforced server-side and is structurally un-widenable:**
 
-### 1.5b Romanized-Indic query path (detect → transliterate)
+- `user_id` is a **required keyword-only argument** on every `VectorStore` method — a forgotten
+  call site is a mypy error, not a silent leak
+- `scoped_where()` builds `{"$and": [{"user_id": …}, {"session_id": …}, …client filters]}` — client
+  filters are AND-ed *underneath* the scope, so they can only narrow, never reach another tenant
+- storage ids are namespaced `{user_id}:{session_id}:{chunk_id}`, so two chats holding the
+  byte-identical file don't overwrite each other
+- `/v1/query` rejects a client-supplied `user_id` filter (`reserved_filter_key`, 400)
+- **Fails closed:** vectors without a `user_id` are invisible rather than leaked
+
+**Content-addressed dedup:** `document_id = uuid5(NAMESPACE_URL, f"{user_id}:{session_id}:{checksum}")`
+with a `(user_id, session_id, checksum)` unique constraint. Re-uploading identical content into the
+same chat updates in place instead of duplicating. The old scheme mixed a per-upload `uuid4` path
+into the id, so dedup never worked.
+
+### 1.6 Romanized-Indic query path (detect → transliterate)
 
 bge-m3 can't retrieve from **romanized** Hindi — the language signal lives in the script, so a
-Latin-typed query (`bharat ki rajdhani`) collapses to ~0.20 recall against the native-Devanagari
-index (measured; see `docs/indic-romanized-spike.md`). The fix is a query-side **detect →
-transliterate → search** step in `RetrievalService.retrieve`:
+Latin-typed query (`bharat ki rajdhani kya hai`) collapses to ~0.20 recall against the
+native-Devanagari index (measured; see `docs/indic-romanized-spike.md`). The fix is a query-side
+**detect → transliterate → search** step in `RetrievalService.retrieve`.
 
-- A `Transliterator` **port** (`transliteration/base.py`) with adapters selected by
-  `transliteration_provider`: **google** (default — googletrans, highest measured quality, free,
-  but a network call per query, with a local rule-based fallback baked in), **indicxlit** (a local
-  offline neural model, `psidharth567/indic-xlit-50M`), **rule-based** (`indic-transliteration`,
-  the zero-dependency floor), **llm** (reuses the generation endpoint). `build_transliterator`
-  is the factory; the query service holds it via the same `app.state` seam as everything else.
-- **Detection, not dual-query.** The first design searched *both* the raw and transliterated
-  forms and fused them, but the eval showed any fusion (max-cosine, RRF, or confidence routing)
-  dragged romanized-Hindi recall *below* pure transliteration (~0.56 vs ~0.70) — the raw search's
-  noise is unavoidable when you can't tell which form is right. So instead
-  `transliteration/detect.py::is_romanized_indic` decides *whether* to transliterate via a cheap
-  linguistic check: distinctly-Hindi function words (`kya`, `hai`, `kaun`, `nahi`, …) that never
-  appear in English. Detected → embed and search the **transliterated** form only; not detected
-  (plain English) → search the raw query untouched, so English stays same-language.
-- Precision is prioritized (a false positive would mis-transliterate a real English query):
-  markers exclude English collisions (`the`, `is`, `to`, `me`), giving 0 English false positives
-  and ~0.98 recall on the eval (higher on natural typing).
-- **Detection returns the target *language*, not just yes/no** (`detect_target_language -> str|None`),
-  which is what enables **Kannada/Telugu** — `RetrievalService` transliterates to whichever script is
-  detected. Three detectors (`TRANSLITERATION_DETECTOR`):
-  - `word-list` (default) — a Hindi function-word check, fast/local, no model.
-  - `muril` — a frozen `google/muril-base-cased` feature extractor (`transliteration/muril.py`,
-    mean-pooled 768-d) + a committed **multinomial** LR head (`scripts/train_romanized_detector.py`,
-    `romanized_indic_detector.joblib`) that classifies **hi/kn/te/other**. Local (no network); the
-    only local path to kn/te. Held-out hi 1.0 / kn 0.987 / te 0.920, 0 false-positives.
-  - `google` — googletrans `detect()`; also hi/kn/te, needs no training data, but a network call per
-    query. Same word-list safety net.
-- Both multi-language detectors were validated on a Wikipedia-derived synthetic eval
-  (`scripts/build_indic_romanized_eval.py`): romanized→native recovery **kn 0.96 / te ~0.97**, 0
-  English false-positives. Both are opt-in (a ~950 MB model or a network call); the default stays
-  Hindi/word-list, and every detector **falls back to the word list on failure** — a fresh checkout
-  and the test suite stay fast and model-free. (Char n-grams are an even lighter local alternative
-  that scored comparably; MuRIL was the chosen approach.)
-- Native-script, CJK, and Thai queries have no Latin markers / detect as their own language, so they
-  skip the path (searched as-is). The response carries `transliterated_query` /
-  `transliteration_applied`.
+**Detection, not dual-query — and the eval is why.** The first design searched *both* the raw and
+transliterated forms and fused them. Every fusion strategy (max-cosine, RRF, confidence routing)
+dragged romanized-Hindi recall *below* pure transliteration (~0.56 vs ~0.67): the raw search's
+noise is irreducible when you can't tell which form is right. So
+`transliteration/detect.py::detect_target_language` decides **whether** to transliterate, via a
+cheap linguistic check — distinctly-Hindi function words (`kya`, `hai`, `kaun`, `nahi`) that
+essentially never appear in English.
 
-### 1.6 Tech stack & data stores
+- Detected → embed and search the **transliterated** form only
+- Not detected (plain English) → search the raw query untouched, so English stays same-language
+
+**Measured (XQuAD-hi, 10k distractors, 150 queries, recall@5):**
+
+| Condition | recall@5 |
+| --- | --- |
+| Native Devanagari | 0.947 |
+| Romanized, raw | 0.204 |
+| Romanized, transliterated | 0.676 |
+| **Shipped (detect → transliterate)** | **0.669** |
+
+**0.20 → 0.67 = 3.3×**; shipped ≈ the transliteration ceiling because detection recall is **98.7%**.
+
+**Precision is prioritized** — a false positive would mis-transliterate a real English query, which
+is worse than missing a Hindi one. The marker list deliberately excludes English collisions (`the`,
+`is`, `to`, `me`, `par`, `ka`). No false positives were observed on the English control set (40
+queries).
+
+**Detection returns the target *language*, not just yes/no** (`detect_target_language -> str|None`),
+which is what enables Kannada/Telugu — `RetrievalService` transliterates to whichever script is
+detected. Three detectors, selected by `TRANSLITERATION_DETECTOR`:
+
+| Detector | Languages | Network | Notes |
+| --- | --- | --- | --- |
+| `word-list` **(default)** | hi | none | Function-word check; fast, local, no model |
+| `muril` | hi/kn/te | none | Frozen `google/muril-base-cased` (mean-pooled 768-d) + committed multinomial LR head. Held-out hi 1.000 / kn 0.987 / te 0.920, 0 FP. ~950 MB model, lazy CPU load |
+| `google` | hi/kn/te | per query | googletrans `detect()`; no training data needed |
+
+Both multi-language detectors were validated on a Wikipedia-derived synthetic eval
+(`scripts/build_indic_romanized_eval.py`): romanized→native recovery **kn 0.96 / te ~0.97**. Both
+are opt-in, and **every detector falls back to the word list on failure** — a fresh checkout and the
+test suite stay fast and model-free.
+
+Native-script, CJK, and Thai queries have no Latin markers, so they skip the path entirely. The
+response carries `transliterated_query` / `transliteration_applied`.
+
+### 1.7 Multi-turn conversation context
+
+A conversational follow-up ("who founded it?") embeds poorly — the referent lives in earlier turns.
+Before retrieval, a small **condense** LLM call (`generation/contextualize.py`) rewrites it into a
+self-contained question.
+
+- The rewrite is used for **retrieval only**; the answer prompt still shows the user's actual
+  wording (`context.model_copy(update={"query": query})`)
+- The condense system prompt explicitly says *preserve the original language and script*, so
+  romanized-Indic detection still fires on the rewritten query
+- `chat_history_max_messages` (default 10, ~5 exchanges) bounds the history fed to both the
+  condense call and the answer prompt
+- Applies identically to the blocking (`RagQueryService.answer`) and streaming
+  (`StreamingAnswerGenerator.stream`) paths
+
+### 1.8 Tech stack & data stores
 
 - **Python 3.13**, FastAPI, Pydantic v2 (+ pydantic-settings)
 - **PostgreSQL** via SQLAlchemy 2.x async + asyncpg; migrations by **Alembic**
 - **ChromaDB** (embedded `PersistentClient`, cosine) — the only vector store
 - **Redis** + **Celery** — async ingestion broker/result backend
-- **bge-m3** (local, 1024-dim) — default embeddings; OpenAI embeddings stay available behind config
+- **bge-m3** (local, 1024-dim, pinned revision) — default embeddings; OpenAI stays behind config
 - **Any OpenAI-compatible chat endpoint** — generation (NVIDIA NIM by default, free tier)
 - **Next.js 16** (App Router, React 19, Tailwind v4) — the frontend (`frontend/`)
-- **langdetect** — language detection
+- **langdetect** — language detection (seeded for determinism)
 - Verification: pytest, ruff (line length 100), mypy `strict`; GitHub Actions CI runs all three
   plus the frontend lint/build
 
@@ -181,8 +269,9 @@ transliterate → search** step in `RetrievalService.retrieve`:
 
 ```text
 api/          HTTP boundary
-  app.py                 create_app() factory; single AppError→ErrorResponse handler
-  schemas.py             ErrorResponse
+  app.py                 create_app() factory; AppError→ErrorResponse handler; CORS;
+                         SecurityHeadersMiddleware (HSTS in prod); optional embedding warm-up
+  schemas.py             ErrorResponse, HealthResponse, ReadinessResponse
   routes/                health · auth · query · chat · chat_stream (SSE) ·
                          chat_documents (per-chat upload/list/delete) · documents (jobs_router)
 auth/         identity
@@ -190,6 +279,9 @@ auth/         identity
   service.py             signup / login orchestration
   repository.py          UserRepository (async)
   dependencies.py        get_current_user (bearer → UserRecord)
+chat/         conversations (M14/M15)
+  repository.py          ChatSessionRepository, MessageRepository (async, user-scoped)
+  service.py             ChatService — sessions, send_message, stream_message, auto-titling
 core/         cross-cutting
   config.py              Settings (pydantic-settings), get_settings() lru_cache
   models.py              all domain models — frozen, tuple-valued
@@ -198,30 +290,38 @@ core/         cross-cutting
 ingestion/    parse → detect → chunk (sync)
   loaders.py             txt/md/html/pdf/docx → LoadedDocument
   language.py            LanguageDetector (langdetect, seeded)
-  chunker.py             TextChunker — overlapping token windows
+  tokenizer.py           Tokenizer protocol + BgeM3Tokenizer (tokenizer only, not the model)
+  chunker.py             TextChunker — overlapping windows over real token ids
   service.py             IngestionService.ingest_file → IngestionResult
   service_utils.py       checksum_text
 embeddings/   port + adapters + factory
   base.py                EmbeddingProvider protocol
-  bge_embeddings.py      local bge-m3 (default); openai_embeddings.py (behind config)
+  bge_embeddings.py      local bge-m3 (default, lru_cached model load)
+  openai_embeddings.py   behind config
   factory.py             build_embedding_provider
 vectorstores/ port + adapter
-  base.py                VectorStore protocol (user_id + session_id scoped); MetadataValue / VectorFilter
+  base.py                VectorStore protocol (user_id + session_id scoped)
   chroma_store.py        cosine; score = 1.0 - distance; meta_-prefixed custom metadata;
                          reload-on-change for multi-process (api + worker) safety
   factory.py             build_vector_store
 retrieval/    query-time
   service.py             RetrievalService.retrieve → RetrievalContext (detect → transliterate)
   context.py             format_context — numbers chunks [1] [2] … for citation
-generation/   port + adapter
+generation/   port + adapters
   base.py                AnswerGenerator protocol
-  openai_compatible_generator.py  any chat.completions endpoint (NIM default) + ChatClient
-  citations.py / language.py      [n]-marker parsing / answer-language resolution
+  openai_compatible_generator.py  any chat.completions endpoint (NIM default) + error mapping
+  streaming.py           StreamingAnswerGenerator (AsyncOpenAI) → Token* then Done
+  contextualize.py       condense a follow-up into a standalone query
+  citations.py           [n]-marker parsing → AnswerCitation
+  language.py            resolve_answer_language + normalize_language_code
   prompts.py             SYSTEM_INSTRUCTIONS + build_answer_prompt
-transliteration/ port + adapters + factory (romanized-Hindi)
-  base.py / detect.py    Transliterator protocol; is_romanized_indic (word-list or MuRIL detector)
-  muril.py               frozen google/muril-base-cased feature extractor (opt-in detector)
-  google.py / indicxlit.py / rule_based.py / llm.py    adapters; factory.py selects by config
+transliteration/ port + adapters + factory
+  base.py                Transliterator protocol
+  detect.py              detect_target_language (word-list / muril / google)
+  script.py              is_latin_script
+  muril.py               frozen google/muril-base-cased feature extractor (opt-in)
+  google.py / indicxlit.py / rule_based.py / llm.py    adapters
+  factory.py             build_transliterator
 documents/    DB-backed document lifecycle (async)
   service.py             DatabaseDocumentIndexingService, save_upload_bytes
   repository.py          DocumentRepository, IngestionJobRepository
@@ -233,9 +333,13 @@ db/           persistence
 workers/
   celery_app.py          Celery app + ingest_document task (asyncio.run bridge)
 evaluation/   offline metrics
-  metrics.py             recall@k, reciprocal_rank, dcg/ndcg@k, language_match_rate
-  datasets.py            EvaluationExample, load_jsonl_dataset
-  run.py                 report CLI
+  metrics.py             recall@k, reciprocal_rank, dcg/ndcg@k, language_match_rate,
+                         citation_precision / citation_recall
+  datasets.py            EvaluationExample, load_jsonl_dataset, load_xquad_corpus
+  harness.py             run_live_evaluation — the REAL pipeline over a corpus
+  faithfulness.py        FaithfulnessJudge protocol + average_faithfulness
+  llm_judge.py           LlmFaithfulnessJudge
+  run.py                 report CLI (fixture or --live)
 ```
 
 ### 2.1 Domain models (`core/models.py`)
@@ -243,9 +347,9 @@ evaluation/   offline metrics
 Every model is **frozen** (`ConfigDict(frozen=True)`) and collections are **`tuple[...]`**, not
 `list`. This immutability propagates through every service signature and response model.
 
-`DocumentMetadata` · `DocumentSection` · `LoadedDocument` · `DocumentChunk` · `IngestionResult`
-· `VectorSearchResult` · `RetrievalContext` · `AnswerCitation` · `GeneratedAnswer` ·
-`DocumentRecord` · `UserRecord` · `IngestionJobRecord`.
+`DocumentMetadata` · `DocumentSection` · `LoadedDocument` · `DocumentChunk` · `IngestionResult` ·
+`VectorSearchResult` · `RetrievalContext` · `AnswerCitation` · `GeneratedAnswer` · `DocumentRecord`
+· `UserRecord` · `IngestionJobRecord` · `ConversationTurn` · `ChatSessionRecord` · `MessageRecord`
 
 ### 2.2 Dependency injection — `app.state` is the seam
 
@@ -255,32 +359,48 @@ constructs the real dependency. Tests attach fakes to `app.state`:
 
 ```python
 app = create_app(Settings(environment="test"))
-app.state.query_service   = FakeQueryService()
-app.state.document_service = FakeDocumentService()
-app.state.current_user    = UserRecord(user_id="user-1", email="u@example.com")
-app.state.enqueue_ingestion = enqueued_jobs.append   # bypass Celery
+app.state.query_service      = FakeQueryService()
+app.state.document_service   = FakeDocumentService()
+app.state.chat_service       = FakeChatService()
+app.state.current_user       = UserRecord(user_id="user-1", email="u@example.com")
+app.state.enqueue_ingestion  = enqueued_jobs.append   # bypass Celery
 ```
 
-Recognized attrs: `settings`, `query_service`, `document_service`, `current_user`,
-`enqueue_ingestion`. There is no `conftest.py`; fakes are plain classes, not mocks.
+Recognized attrs: `settings`, `query_service`, `document_service`, `chat_service`,
+`streaming_answerer`, `current_user`, `enqueue_ingestion`.
 
-> Consequence worth knowing: every route integration test injects a fake service, so the real
-> `DatabaseDocumentIndexingService`, both repositories, and `run_ingestion_job` currently have
-> **zero test coverage**.
+The query service is also **memoized** on `app.state` on first build, so the Chroma client and the
+2.2 GB embedding model aren't rebuilt per request. It is lazy (not built in the lifespan) so the
+offline test suite never loads the model.
+
+There is no `conftest.py`; fakes are plain classes, not mocks.
+
+**When adding a route with a new dependency:** declare a `Protocol` for the service, add the
+`get_*` fallback helper, and hang the override off `app.state`.
 
 ### 2.3 Error handling
 
-Raise `AppError(message, code="snake_case_code", status_code=...)`, never `HTTPException`. A
-single handler in `api/app.py` renders it as `ErrorResponse`. The `code` is part of the API
-contract.
+Raise `AppError(message, code="snake_case_code", status_code=...)`, never `HTTPException`. A single
+handler in `api/app.py` renders it as `ErrorResponse`. **The `code` is part of the API contract** —
+the frontend switches on it.
 
 ### 2.4 Configuration
 
 `Settings` is injected as an object, never read from env at use sites. Routes reach it via
 `cast(Settings, request.app.state.settings)`; services take it as a constructor arg.
-`get_settings()` is `lru_cache`d. **Import-time side effect:** `db/session.py` and
-`workers/celery_app.py` call `get_settings()` and build engines at module import — importing
-anything that transitively pulls in `db.session` reads `.env` and constructs an async engine.
+`get_settings()` is `lru_cache`d — construct `Settings(...)` explicitly in tests rather than
+mutating env.
+
+**Boot guards:** production/staging refuse to start with the placeholder JWT secret, with a secret
+under 32 bytes, or without `GENERATION_API_KEY`.
+
+**Tuple settings** (`CORS_ALLOW_ORIGINS`, `TRANSLITERATION_LANGUAGES`) are `NoDecode`-annotated and
+parsed comma-separated — without that, pydantic-settings JSON-decodes them inside the env source
+and the app can't boot from `CORS_ALLOW_ORIGINS=http://localhost:3000`.
+
+**Import-time side effect:** `db/session.py` and `workers/celery_app.py` call `get_settings()` and
+build engines at module import — importing anything that transitively pulls in `db.session` reads
+`.env` and constructs an async engine. Avoid importing them in tests that shouldn't need a database.
 
 ### 2.5 Database schema (`db/models.py`)
 
@@ -288,6 +408,11 @@ anything that transitively pulls in `db.session` reads `.env` and constructs an 
 erDiagram
     users ||--o{ documents : owns
     users ||--o{ ingestion_jobs : owns
+    users ||--o{ chat_sessions : owns
+    chat_sessions ||--o{ messages : contains
+    chat_sessions ||--o{ documents : scopes
+    chat_sessions ||--o{ ingestion_jobs : scopes
+    messages ||--o{ message_citations : cites
     documents ||--o| document_files : has
     documents ||--o{ document_chunks : has
     documents ||--o{ ingestion_jobs : produces
@@ -296,9 +421,17 @@ erDiagram
       str email UK
       str password_hash
     }
+    chat_sessions {
+      str id PK
+      str user_id FK
+      str title
+    }
+    messages { str id PK  str session_id FK  str role  str content }
+    message_citations { str id PK  str message_id FK  str document_id FK  str chunk_id }
     documents {
       str id PK
       str user_id FK
+      str session_id FK
       str checksum
       str language
       int chunk_count
@@ -306,90 +439,219 @@ erDiagram
     }
     document_files { str id PK  str document_id FK  int size_bytes }
     document_chunks { str id PK  str document_id FK  str chunk_id  int chunk_index }
-    ingestion_jobs { str id PK  str user_id FK  str status  str document_id FK }
+    ingestion_jobs { str id PK  str user_id FK  str session_id FK  str status  str document_id FK }
 ```
 
-- `document_chunks` **mirrors** Chroma metadata for traceability — chunk writes must stay in
-  sync with vector upserts.
-- `chat_sessions`, `messages`, `message_citations` exist as ORM tables but are **unused
-  placeholders** for a future chat milestone — not dead code.
-- **No FK carries `ondelete`** (see §7).
+- `chat_sessions`, `messages`, `message_citations` are **live** — the persisted chat layer since
+  M14, written by `chat/repository.py`.
+- `document_chunks` **mirrors** Chroma metadata for traceability — chunk writes must stay in sync
+  with vector upserts.
+- **Cascades:** child FKs are `ondelete="CASCADE"` (`SET NULL` on `ingestion_jobs.document_id`).
+  Deleting a chat drops its messages, citations, documents, and jobs.
+- Unique constraints: `users.email`; `(user_id, session_id, checksum)` on `documents`;
+  `(document_id, chunk_id)` on `document_chunks`.
 
 ### 2.6 Vector store specifics (`vectorstores/chroma_store.py`)
 
 Cosine space; `score = 1.0 - distance`. Chroma metadata must be flat scalars, so custom chunk
-metadata is stored `meta_`-prefixed and unwrapped on read. Document IDs are derived in
-`ingestion/service.py` via `uuid5(NAMESPACE_URL, f"{source_path}:{checksum}")`.
+metadata is stored `meta_`-prefixed and unwrapped on read.
 
-### 2.7 Migrations
+**Multi-process safety — the non-obvious part.** Embedded Chroma caches index segments per process,
+so the API's client goes stale after the Celery worker writes: silently wrong results, or
+"Error finding id". Running a Chroma server would fix it but adds a container and a failure mode.
+Instead the adapter uses **reload-on-change**: it tracks the persist directory's newest mtime and,
+when that advances (another process wrote), clears Chroma's process-wide client cache and reopens.
+All operations are serialized under a lock so a reopen never tears a client down mid-query.
+
+Covered by `tests/integration/test_chroma_multiprocess.py`, which drives a real second process.
+No Chroma server required.
+
+> **Known cost:** `_dir_mtime()` walks the whole persist directory on every operation. Fine at
+> current scale; a version counter or sentinel file would be cheaper at a much larger index.
+
+### 2.7 Chunking (`ingestion/chunker.py`, `ingestion/tokenizer.py`)
+
+`TextChunker` windows over the **embedding model's own token ids**, not whitespace.
+
+**Why it matters:** the original `\S+` split dropped ~96% of a Chinese article. CJK and Thai have no
+inter-word spaces, so a whole document collapsed into one "token" → one oversized chunk that
+overran the model's input limit, silently. English was losing ~50% at `chunk_size=800` because the
+unit was wrong.
+
+`BgeM3Tokenizer` loads **only** the tokenizer (a few MB of sentencepiece), not the 2.2 GB model, so
+ingestion stays light. Defaults: `chunk_size_tokens=800`, `chunk_overlap_tokens=120`.
+
+### 2.8 Citations (`generation/citations.py`)
+
+Context chunks are numbered `[1] [2] …` by `retrieval/context.py::format_context`, and the system
+prompt asks the model to cite by bracket number. `answer_citations` maps those markers back to the
+retrieved results.
+
+- Markers are 1-based; out-of-range markers are ignored; repeats de-duplicated
+- An answer with **no valid markers cites nothing** — never everything
+- Shared by the blocking and streaming generators, so both cite identically
+
+### 2.9 Answer language (`generation/language.py`)
+
+`resolve_answer_language` picks: caller preference → query language → **modal language of the
+retrieved evidence** → `en`.
+
+**Why the fallback exists:** langdetect returns `"unknown"` for text under 20 characters — which is
+most real questions — and the generator used to pass that straight into the prompt.
+`normalize_language_code` also reduces `zh-cn` → `zh`, because langdetect emits BCP-47-ish tags
+while corpora use bare ISO codes; comparing them raw made a *correct* answer score as wrong.
+
+### 2.10 Migrations
 
 `alembic/env.py` ignores `sqlalchemy.url` in `alembic.ini` and derives the URL from
-`get_settings().database_url`, rewriting the async driver to sync
-(`postgresql+asyncpg` → `postgresql`). Configure migrations through `DATABASE_URL`.
+`get_settings().database_url`, rewriting the async driver to sync (`postgresql+asyncpg` →
+`postgresql`). Configure migrations through `DATABASE_URL`.
+
+| Revision | What it does |
+| --- | --- |
+| `0001_initial_schema` | Base tables |
+| `0002_fk_ondelete_cascade` | Child FKs `CASCADE` / `SET NULL` — fixes a broken DELETE |
+| `0003_documents_user_checksum_unique` | Content-addressed dedup constraint |
+| `0004_chat_fk_ondelete_cascade` | Chat-table cascades |
+| `0005_chat_scoped_documents` | M18 — `session_id` on documents/jobs, widened dedup |
 
 ---
 
-## 3. Evaluation (M0 outcome baked in)
+## 3. Evaluation
 
-`data/eval/xquad/` holds the cross-lingual eval corpus (XQuAD gold + queries, committed;
-distractors regenerated by `scripts/build_eval_corpus.py` from pinned dataset revisions +
-`SEED=42`). The M0 thesis spike measured cross-lingual retrieval and selected **`bge-m3`** over
-`multilingual-e5-large`. Full result: `docs/m0/report.md`. The current code still uses OpenAI
-embeddings; the swap is Phase C.
+`data/eval/xquad/` holds the cross-lingual eval corpus (XQuAD gold + queries committed;
+distractors regenerated by `scripts/build_eval_corpus.py` from pinned dataset revisions + `SEED=42`,
+verified byte-identical across runs).
+
+**The harness runs the real pipeline**, not a static fixture: `evaluation/harness.py` ingests
+through the actual `VectorStore` and queries through the actual `RetrievalService`, so retrieval
+quality is *measured* rather than assumed. It takes the ports, so tests inject fakes and the real
+run uses bge-m3 + Chroma for free.
+
+```powershell
+python -m multilingual_rag.evaluation.run --live --langs en zh --k 5
+```
+
+**Recorded baseline** (en+zh, 40,480 docs, 2,380 queries, $0):
+
+| Metric | Value |
+| --- | --- |
+| recall@5 | **0.903** |
+| MRR | **0.815** |
+| nDCG@5 | **0.837** |
+
+Generation metrics (citation precision/recall, faithfulness, answer language) are **sampled** via
+`--gen-sample` — one model call per query against a rate-limited free tier would burn the quota.
+They score **only generated examples**, otherwise a sampled run would look broken.
+
+**This baseline is the regression guard:** a phase that moves metrics down doesn't land.
 
 ---
 
 ## 4. Key design decisions (why, not just what)
 
-| Decision | Rationale |
-|---|---|
-| Ports & adapters everywhere | Swap any external (embed model, vector DB, LLM) without touching services or tests |
-| Frozen models + tuples | Kill a whole class of aliasing/mutation bugs across layers |
-| `app.state` DI over `dependency_overrides` | Tests build a real app and hang plain fakes off state; no mock framework |
-| `AppError` over `HTTPException` | Stable machine-readable `code` as API contract; one render site |
-| Async ingestion via Celery | Uploads return immediately; embedding/indexing runs off the request |
-| `document_chunks` mirrors Chroma | Traceability / debuggability of what was indexed |
+| Decision | Rationale | Alternative rejected |
+| --- | --- | --- |
+| Ports & adapters everywhere | Swap any external without touching services or tests | Direct imports — untestable without mocks |
+| Sync core, async edge | Local models + sync clients can't be truly async; `to_thread` at the boundary is honest | Full async rewrite — a lie that stalls the loop |
+| Detect, don't fuse (romanized) | Every fusion scored *below* pure transliteration (~0.56 vs ~0.67) | Dual-query + RRF/max-cosine — built, measured, deleted |
+| Word-list detector by default | ~98% recall, no model, no network, hermetic tests | MuRIL always-on — 950 MB for no measured gain |
+| Token-window chunking | Whitespace dropped ~96% of a Chinese article | `\S+` splitting |
+| Reload-on-change for Chroma | Multi-process correctness with no extra container | Chroma server mode |
+| Frozen models + tuples | Kills a class of aliasing/mutation bugs across layers | Mutable dataclasses |
+| `app.state` DI over `dependency_overrides` | Tests build a real app and hang plain fakes off state | A mocking framework |
+| `AppError` over `HTTPException` | Stable machine-readable `code` as API contract; one render site | Raising HTTP errors in services |
+| Async ingestion via Celery | Uploads return immediately; embedding runs off the request | Inline indexing — a 30 s upload |
+| DB rows → vectors → one commit | Neither store can be left orphaned | Vectors first |
+| Content-addressed `document_id` | Re-upload updates in place | uuid4 in the id — dedup never worked |
+| Provider is a URL, not a code path | NIM/OpenRouter/Groq/Ollama/OpenAI by config alone | A provider enum + per-vendor adapters |
+| `document_chunks` mirrors Chroma | Traceability of what was actually indexed | Vectors as the only record |
 
 ---
 
-## 5. Environments
+## 5. Environments & operations
 
-`docker compose up` brings up postgres + redis + api + worker. `OPENAI_API_KEY` is required
-for embedding/generation paths. Postgres and Redis must be running for anything touching
-documents or auth.
+```powershell
+docker compose up --build     # postgres · redis · api · worker · frontend
+```
+
+- **Postgres and Redis must be running** for anything touching documents or auth
+- **`GENERATION_API_KEY`** is required for answer generation (any OpenAI-compatible endpoint;
+  NVIDIA NIM by default). `OPENAI_API_KEY` is only needed if `EMBEDDING_PROVIDER=openai`
+- The **worker is not optional** — without it, ingestion silently stalls at `queued`
+- `WARM_EMBEDDINGS_ON_STARTUP` moves the ~10 s model load to boot; `HF_HUB_OFFLINE` skips Hub
+  round-trips when the model is already cached
+- Health: `GET /healthz`; readiness: `GET /readyz` (only requires an OpenAI key when OpenAI
+  embeddings are actually selected)
+
+**Docker note:** the image installs the **CPU-only torch wheel first**, so the subsequent
+`pip install .` doesn't pull the CUDA build — ~5 GB of unusable libraries in a container with no
+GPU. Image: 9.01 GB → 2.46 GB.
 
 ---
 
-## 6. Directory reference
+## 6. Verification
+
+```powershell
+python -m pytest
+python -m ruff check .          # add --fix
+python -m mypy src
+```
+
+All three must pass. mypy is `strict = true`; untyped third-party libs (celery, chromadb) need
+`# type: ignore[...]` with the **specific** code. GitHub Actions runs all three plus the frontend
+lint/build on every push.
+
+---
+
+## 7. Directory reference
 
 ```text
 src/multilingual_rag/   application (see §2 map)
-alembic/                migrations (0001_initial_schema)
-scripts/                smoke_test.py · build_eval_corpus.py
-data/eval/              sample_qa.jsonl (legacy fixture) · xquad/ (M0 corpus)
-docs/                   architecture.md · skills.md · progress.md · m0/report.md
+frontend/               Next.js 16 app (App Router, React 19, Tailwind v4)
+alembic/versions/       0001 … 0005 (see §2.10)
+scripts/                smoke_test.py · build_eval_corpus.py · build_indic_romanized_eval.py ·
+                        eval_romanized.py · train_romanized_detector.py
+data/eval/              xquad/ (M0 corpus) · indic/ (kn/te) · sample_qa.jsonl
+data/models/            romanized_indic_detector.joblib (committed, KB-sized)
+docs/                   architecture.md · skills.md · progress.md · indic-romanized-spike.md ·
+                        m0/report.md
 tests/                  unit/ · integration/ (no conftest.py)
 ```
 
 ---
 
-## 7. Defects found & how they were fixed
+## 8. Gotchas worth knowing
 
-The build record: every defect found in the audit and since, with its repair (Phases A–D, then the
-product milestones). **All are fixed** — kept so the reasoning isn't lost. Status per milestone is
-tracked in `docs/progress.md`.
+- **Import-time engines.** `db/session.py` and `workers/celery_app.py` build engines at import.
+- **`get_settings()` is cached.** Construct `Settings(...)` in tests; don't mutate env.
+- **Chroma metadata must be flat scalars.** Nested values are dropped, not raised on.
+- **Chunk writes must stay in sync with vector upserts**, or `document_chunks` lies.
+- **`/v1/query` is not chat-scoped** the way the chat path is — it searches all of a user's chunks.
+  Two retrieval paths with different scoping semantics.
+- **`delete_chat_document`** passes `session_id` to the vector store, but `DocumentRepository.delete`
+  filters only on `user_id` — deleting via the wrong chat can orphan vectors.
 
-| # | Defect (current state) | Fix |
-|---|---|---|
-| ~~Security~~ ✅ | ~~`POST /v1/query` unauthenticated; Chroma has no `user_id`~~ — **fixed in Phase A**: query requires a bearer token, chunks carry `user_id`, search/delete are user-scoped, storage ids namespaced by user | A ✅ |
-| ~~Security~~ ✅ | ~~default prod secret; uncapped uploads~~ — **fixed in Phase A**: `Settings` refuses the placeholder secret in prod/staging; uploads capped at `max_upload_bytes` (413) | A ✅ |
-| ~~Quality~~ ✅ | ~~cites every retrieved chunk~~ — **fixed in B**: `generation/citations.py` parses the model's `[n]` markers, cites only those | B ✅ |
-| ~~Quality~~ ✅ | ~~`evaluation/run.py` scores a static fixture~~ — **fixed in B**: `--live` runs the real pipeline (bge-m3 + Chroma) over the XQuAD corpus | B ✅ |
-| ~~Multilingual~~ ✅ | ~~`\S+` collapses CJK/Thai to one chunk~~ — **fixed in C1**: `TextChunker` windows over bge-m3 token ids (`ingestion/tokenizer.py`); a long Chinese doc now yields many chunks | C ✅ |
-| ~~Multilingual~~ ✅ | ~~`"unknown"` language leaks into the prompt~~ — **fixed in C2**: `resolve_answer_language` falls back to evidence language, then `en` | C ✅ |
-| ~~Model~~ ✅ | ~~still on OpenAI embeddings~~ — **fixed in C3**: bge-m3 (1024-dim, no prefixes) is the default via `embeddings/factory.py`; OpenAI stays available behind config | C ✅ |
-| ~~Runtime~~ ✅ | ~~Sync core blocks the event loop; clients built per-request~~ — **fixed in D1/D3**: the query route offloads the blocking core via `asyncio.to_thread`; the query service is built once and memoized on `app.state` | D ✅ |
-| ~~Data~~ ✅ | ~~`DELETE /v1/documents/{id}` bypasses ORM cascade; no FK `ondelete` → IntegrityError~~ — **fixed in D4**: child FKs are `ondelete=CASCADE` (`SET NULL` on `ingestion_jobs`) + migration `0002`; live DELETE now returns 200 | D ✅ |
-| ~~Data~~ ✅ | ~~Chroma upserted before Postgres → orphan vectors; dedup defeated by uuid4-in-path; file "checksum" hashed the path~~ — **fixed in D5/D6/D7**: DB-first write with compensating vector delete; `document_id = uuid5(user_id:checksum)` + `(user_id, checksum)` unique (migration `0003`); checksum is the content hash | D ✅ |
-| ~~Testing~~ ✅ | ~~DB/worker layer has zero coverage~~ — **fixed in D9**: `tests/integration/test_db_layer.py` exercises repositories + `run_ingestion_job` against real Postgres (gated skip when unreachable); the legacy `DocumentStore` path was deleted in D8 | D ✅ |
-| ~~Runtime~~ ✅ | ~~Embedded Chroma shared by api + worker processes: the API's client caches index segments, so it silently misses (or fails to resolve — "Error finding id") rows the worker wrote~~ — **fixed**: `ChromaVectorStore` reloads on change (tracks the persist dir's newest mtime; on advance clears Chroma's process-wide client cache and reopens, all ops under a lock). Regression test `tests/integration/test_chroma_multiprocess.py` drives a real second process. No Chroma server needed | ✅ |
+---
+
+## 9. Defects found & how they were fixed
+
+The build record: every defect found in the audit and since, with its repair. **All are fixed** —
+kept so the reasoning isn't lost. Status per milestone is in `docs/progress.md`.
+
+| Area | Defect | Fix |
+| --- | --- | --- |
+| Security ✅ | `POST /v1/query` unauthenticated; Chroma had no `user_id` | Phase A — bearer required, chunks carry `user_id`, search/delete scoped, storage ids namespaced |
+| Security ✅ | Default prod secret; uncapped uploads | Phase A — `Settings` refuses the placeholder in prod/staging; uploads capped (413) |
+| Quality ✅ | Cited every retrieved chunk | Phase B — `generation/citations.py` parses `[n]` markers |
+| Quality ✅ | `evaluation/run.py` scored a static fixture | Phase B — `--live` runs the real pipeline over XQuAD |
+| Multilingual ✅ | `\S+` collapsed CJK/Thai to one chunk | C1 — token-id windowing (`ingestion/tokenizer.py`) |
+| Multilingual ✅ | `"unknown"` language leaked into the prompt | C2 — `resolve_answer_language` falls back to evidence, then `en` |
+| Model ✅ | Still on OpenAI embeddings | C3 — bge-m3 (1024-dim, no prefixes) is the default |
+| Runtime ✅ | Sync core blocked the event loop; clients rebuilt per request | D1/D3 — `asyncio.to_thread`; query service memoized on `app.state` |
+| Data ✅ | `DELETE` bypassed ORM cascade; no FK `ondelete` → IntegrityError | D4 — `ondelete=CASCADE` + migration `0002` |
+| Data ✅ | Chroma upserted before Postgres; dedup defeated by uuid4-in-path; "checksum" hashed the path | D5/D6/D7 — DB-first with compensating delete; `uuid5(user_id:checksum)` + unique constraint; content hash |
+| Testing ✅ | DB/worker layer had zero coverage | D9 — `tests/integration/test_db_layer.py` against real Postgres |
+| Runtime ✅ | Embedded Chroma went stale across api + worker processes | Reload-on-change (mtime + `clear_system_cache`, ops under a lock); two-process regression test |
+| Deploy ✅ | 5 deployment bugs (env-var tuple parsing, host `.env` leaking localhost, OpenAI-gated readiness, root-owned model cache) | Fixed via full-stack smoke test |
+| Deploy ✅ | Image carried ~5 GB of unusable CUDA libraries | CPU-only torch installed first — 9.01 GB → 2.46 GB |
