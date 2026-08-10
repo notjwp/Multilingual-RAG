@@ -25,10 +25,12 @@ data/eval/indic/distractors_*.jsonl
 # the graduated report lives in docs/. This is a safety net against accidental 60MB commits.
 spikes/
 
-# Personal working notes (resume / job-search session records) — kept locally alongside the
-# code they reference, but not part of the project.
+# Personal working notes (interview prep) — kept locally alongside the code they
+# reference, but not part of the project. PDFs are rendered from the markdown.
 decision.md
 flow.md
+decision.pdf
+flow.pdf
 
 # OS / editor cruft
 .DS_Store
