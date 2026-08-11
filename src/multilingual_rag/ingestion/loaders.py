@@ -44,7 +44,6 @@ class DocumentLoader:
                 code="invalid_document_path",
                 status_code=400,
             )
-
         suffix = resolved_path.suffix.lower()
         loader = self._loader_for_suffix(suffix)
         return loader(resolved_path)
@@ -67,7 +66,6 @@ class DocumentLoader:
                 code="unsupported_document_type",
                 status_code=400,
             ) from exc
-
 
 def load_text_document(path: Path) -> LoadedDocument:
     """Load plain text or Markdown documents."""
