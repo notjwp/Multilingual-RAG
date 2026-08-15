@@ -42,7 +42,10 @@ lets tests pass plain fakes with no mocking library.
 | `EmbeddingProvider` | `embeddings/base.py` | `BgeM3EmbeddingProvider` **(default)**, `OpenAIEmbeddingProvider` | `embeddings/factory.py` |
 | `VectorStore` | `vectorstores/base.py` | `ChromaVectorStore` | `vectorstores/factory.py` |
 | `AnswerGenerator` | `generation/base.py` | `OpenAICompatibleAnswerGenerator` | constructed in the query route |
+| `StreamClient` | `generation/base.py` | `OpenAICompatibleStreamClient` | `agent/factory.py::build_stream_client` |
 | `Transliterator` | `transliteration/base.py` | `google` **(default)**, `indicxlit`, `rule-based`, `llm` | `transliteration/factory.py` |
+| `Retriever` | `retrieval/base.py` | `RetrievalService` | `agent/factory.py::build_retriever` |
+| `RelevanceGrader` | `agent/grading/base.py` | `ScoreThresholdGrader` **(default, free)**, `LlmRelevanceGrader` | `agent/grading/factory.py` |
 
 Each factory selects its adapter from `Settings` and imports it **lazily**, so a module that never
 builds a vector store never pulls in `chromadb`, and the offline test suite never loads the 2.2 GB
@@ -50,26 +53,30 @@ embedding model.
 
 ### 1.2 Sync core, async edge
 
-The entire RAG core — ingestion, chunking, embedding, vector I/O, retrieval, generation — is
-**synchronous**. Only the API, the DB session, and the repository layer are `async`.
+The RAG core — ingestion, chunking, embedding, vector I/O, retrieval — is **synchronous**. The API,
+the DB session, the repository layer, and the **orchestrator** are `async`.
 
-- `RagQueryService.answer_query` is a **sync** method called from an **async** route.
-- The Celery worker bridges back to async with `asyncio.run()` (`workers/celery_app.py`).
+**Why:** local model inference is genuinely blocking. Marking it `async` would be a lie that stalls
+the event loop. So the blocking work is offloaded *explicitly*.
 
-**Why:** local model inference and the sync OpenAI client are genuinely blocking. Marking them
-`async` would be a lie that stalls the event loop. So the blocking work is offloaded *explicitly*:
+**The bridge lives in the graph's nodes, not the routes.** Before the agent graph, a route
+offloaded a whole sync orchestrator (`await asyncio.to_thread(query_service.answer_query, …)`).
+Now each node offloads its own blocking call, and there is no `to_thread` in any route or in
+`ChatService`. Two calls need it, not one — retrieval *and* routing:
 
-| Call site | Bridge |
-| --- | --- |
-| `api/routes/query.py` | `await asyncio.to_thread(query_service.answer_query, …)` |
-| `chat/service.py::send_message` | `await asyncio.to_thread(self.query_service.answer, …)` |
-| `generation/streaming.py::stream` | `await asyncio.to_thread(retrieval_service.retrieve, …)` |
-| `workers/celery_app.py` | `asyncio.run(...)` — async → sync direction |
+| Node | Bridge | Why |
+| --- | --- | --- |
+| `route_language` | `await asyncio.to_thread(retriever.route, …)` | `detect_target_language` calls `asyncio.run` internally on the `google` detector path (`transliteration/detect.py:129-137`) — invoking it on a running loop raises `RuntimeError` |
+| `retrieve` | `await asyncio.to_thread(retriever.retrieve, …)` | local bge-m3 embed + Chroma search |
 
-Streaming is the one exception that is *natively* async: `StreamingAnswerGenerator` uses
-`openai.AsyncOpenAI`, because a token stream is real I/O. Retrieval inside it is still offloaded.
+The routing one is a trap worth naming: the default `word-list` detector takes no `asyncio.run`
+path, so forgetting the offload would leave the whole test suite green and fail only in production
+with `TRANSLITERATION_DETECTOR=google`. `tests/unit/test_agent_graph.py` asserts the routing call
+does not run on the main thread.
 
-**Rule for new code:** keep core logic sync; keep `async` at the HTTP/DB boundary.
+The Celery worker still bridges the other way — `asyncio.run(...)` in `workers/celery_app.py`.
+
+**Rule for new code:** keep core logic sync; keep `async` at the HTTP/DB boundary and in the graph.
 
 ### 1.3 Request flows
 
@@ -78,15 +85,21 @@ Streaming is the one exception that is *natively* async: `StreamingAnswerGenerat
 ```mermaid
 flowchart LR
     C[Client] -->|POST /v1/query| Q[query route]
-    Q -->|asyncio.to_thread| RS[RagQueryService]
-    RS --> RET[RetrievalService]
-    RET --> DET[detect romanized Indic?]
-    DET --> EMB[EmbeddingProvider / bge-m3]
+    Q -->|reserved-filter guard| Q
+    Q --> G[RagGraph.answer / ainvoke]
+    G --> RL[route_language · to_thread]
+    RL --> RET[retrieve · to_thread]
+    RET --> EMB[bge-m3]
     RET --> VS[VectorStore / Chroma]
-    RS --> GEN[AnswerGenerator]
+    RET --> GR[grade]
+    GR -->|weak| RP[repair] --> RET
+    GR -->|relevant| GEN[generate]
     GEN --> LLM[OpenAI-compatible endpoint]
-    RS -->|answer + citations + chunks| C
+    G -->|answer + citations + chunks| C
 ```
+
+No `asyncio.to_thread` at the route any more — the graph offloads per node (§1.2). Steps are
+emitted but discarded: `ainvoke` installs a no-op stream writer, so this path costs nothing extra.
 
 #### Chat message, streamed — `POST /v1/chats/{id}/messages/stream`
 
@@ -97,14 +110,19 @@ flowchart TD
     R --> CS[ChatService.stream_message]
     CS -->|load recent history| PG
     CS -->|persist user turn| PG
-    CS --> SG[StreamingAnswerGenerator]
-    SG -->|condense follow-up| LLM[LLM]
-    SG -->|to_thread| RET[RetrievalService scoped by user + session]
-    SG -->|Token deltas| C
-    SG -->|Done: assembled answer| CS
+    CS --> G[RagGraph.stream · astream custom channel]
+    G -->|condense follow-up| LLM[LLM]
+    G -->|route + retrieve, to_thread| RET[Retriever scoped by user + session]
+    G -->|grade weak → repair → retrieve| RET
+    G -->|Step running/done| C
+    G -->|Token deltas| C
+    G -->|Done: assembled answer| CS
     CS -->|persist assistant turn + citations| PG
     CS -->|event: done| C
 ```
+
+Steps and tokens share one `custom` stream channel and are discriminated by type; `ChatService`
+re-wraps them as `StepChunk` / `TokenChunk`. Only the turns are persisted — steps are not.
 
 Ownership is verified **before** the `StreamingResponse` opens — once headers are sent, a failure
 can only be reported as an SSE `error` event, not an HTTP status.
@@ -151,8 +169,8 @@ chat grounds only *that* chat's answers.
   a chat drops its documents)
 - dedup constraint is `(user_id, session_id, checksum)`
 - the content-addressed `document_id` folds in `session_id`
-- `session_id` threads through the `VectorStore` methods and retrieval →
-  `RagQueryService.answer` / `StreamingAnswerGenerator.stream`
+- `session_id` threads through the `VectorStore` methods and retrieval → the agent graph, where it
+  lives in `AgentState` and is re-read by every `retrieve` attempt, including after a repair
 
 There is no user-wide document library and no global `/v1/documents` route.
 
@@ -247,8 +265,8 @@ self-contained question.
   romanized-Indic detection still fires on the rewritten query
 - `chat_history_max_messages` (default 10, ~5 exchanges) bounds the history fed to both the
   condense call and the answer prompt
-- Applies identically to the blocking (`RagQueryService.answer`) and streaming
-  (`StreamingAnswerGenerator.stream`) paths
+- Applies identically to both paths, because both are the same graph: condense is one node, and a
+  conditional entry edge skips it entirely when there is no history
 
 ### 1.8 Tech stack & data stores
 
@@ -260,14 +278,119 @@ self-contained question.
 - **Any OpenAI-compatible chat endpoint** — generation (NVIDIA NIM by default, free tier)
 - **Next.js 16** (App Router, React 19, Tailwind v4) — the frontend (`frontend/`)
 - **langdetect** — language detection (seeded for determinism)
+- **LangGraph 0.6** — the agent graph in `agent/` (§1.9). Pulls `langchain-core` → `langsmith`
+  transitively; `LANGSMITH_TRACING=false` is set in `.env.example` and CI so no tracing thread
+  ever starts
 - Verification: pytest, ruff (line length 100), mypy `strict`; GitHub Actions CI runs all three
   plus the frontend lint/build
+
+### 1.9 Agentic orchestration (`agent/`)
+
+**The only orchestration.** All three entry points go through `RagGraph`, obtained from
+`api/dependencies.py::get_rag_graph`. Nothing outside `agent/` imports LangGraph.
+
+**Why it exists.** The same condense → retrieve → generate pipeline used to be written three
+times:
+
+| Route | Was | Now |
+| --- | --- | --- |
+| `POST /v1/query` | `RagQueryService.answer_query` (sync) | `RagGraph.answer` |
+| `POST /v1/chats/{id}/messages` | `RagQueryService.answer` (sync) | `RagGraph.answer` |
+| `POST /v1/chats/{id}/messages/stream` | `StreamingAnswerGenerator.stream` (async) | `RagGraph.stream` |
+
+Two of them duplicated the same seven steps, held together by a
+`cast(RagQueryService, …).retrieval_service` reach-through in `chat_stream.py` that existed only so
+the 2.2 GB embedding model wasn't loaded twice. That cast is gone:
+`agent/factory.py::build_rag_graph` constructs the stack once, so the hazard is removed by
+construction. `app.state.query_service` and `app.state.streaming_answerer` collapsed into one
+`app.state.rag_graph`.
+
+**The topology** (rendered from the compiled graph, so it cannot drift):
+
+```mermaid
+graph TD;
+    __start__([__start__]) -.-> condense;
+    __start__ -.-> route_language;
+    condense --> route_language;
+    route_language --> retrieve;
+    retrieve --> grade;
+    grade -.-> generate;
+    grade -.-> repair;
+    grade -.-> generate_no_context;
+    repair --> retrieve;
+    generate --> __end__([__end__]);
+    generate_no_context --> __end__;
+```
+
+Dotted edges are conditional. `repair → retrieve → grade → repair` is a genuine cycle, and
+"no condense on a first turn" is a conditional *entry* edge rather than an early return, so it is
+a structural property of the graph rather than a branch inside a node.
+
+**`repair` is the project-specific part.** Generic corrective RAG asks "rewrite the query?"; this
+asks **"was my script routing wrong?"** first, because that is the decision this pipeline exists to
+make. `agent/repair.py::choose_repair` is a pure function picking, cheapest-first:
+
+1. `raw_fallback` — the query *was* transliterated, so the transliterated search is what just
+   failed. Retry the raw form. Free (one embed, one search). Justified by measurement, not taste:
+   `scripts/eval_romanized.py` puts shipped retention at 0.747 against native 1.0, so a real
+   population of queries is *hurt* by transliterating.
+2. `relanguage` — a Latin-script query with more than one configured Indic language: the detector
+   may have picked the wrong one. Correctly never fires on the default `hi`-only config.
+3. `rewrite` — one LLM call, a different prompt from condense.
+
+**Grading is a port** (`agent/grading/`). `ScoreThresholdGrader` is the default and costs nothing,
+which keeps a turn at two provider calls. Note this is *not* a contradiction of
+`transliteration/detect.py`'s finding that "score-based routing proved unreliable at scale": that
+was a **relative** judgement between two competing query forms, this is an **absolute** abstain
+check ("did anything clear the floor at all"). The honest limitation is recorded in
+`agent/grading/score_threshold.py` — bge-m3 cosine scores are not calibrated across languages, so
+one global floor is inherently more aggressive for one script than another. `LlmRelevanceGrader`
+is opt-in, costs one call per attempt, and **fails open**: an unparseable verdict or any
+`OpenAIError` grades as relevant, because a flaky judge must never cost the user an answer.
+
+**Streaming.** Nodes emit `Token` / `Step` / `Done` onto LangGraph's single `custom` channel via
+`agent/events.py::emit`. Not `stream_mode="messages"` — that taps LangChain's callback manager for
+`BaseChatModel` output, and generation here is the raw `openai` SDK. `emit` no-ops under `ainvoke`
+and off-graph, so `generate` always streams internally and blocking callers simply collect: there
+is no `if streaming:` anywhere, which is what lets one node serve all three routes.
+
+**Two deliberate omissions**, both load-bearing:
+
+- **No tools** — no `ToolNode`, no `bind_tools`. Retrieval is a *node*, so the model never authors
+  arguments and cannot reach another tenant's documents by writing a different `user_id`. The
+  Phase A tenancy guarantee is structural, not prompt-enforced.
+- **No checkpointer** — conversation history already lives in the `messages` table and is loaded
+  by `ChatService._history`. LangGraph persistence would be a second, competing source of truth.
+
+**Error contract.** `GraphRecursionError` is mapped to `AppError(agent_recursion_limit)` because
+`chat_stream.py` renders `event: error` only for `AppError`; an unmapped escape would truncate the
+SSE response with no error frame. Verified: node exceptions propagate through `astream` unwrapped.
+
+**Steps on the wire.** `Step` events become SSE `event: step` frames
+(`{id, node, status, label, detail}`), emitted as **running → done pairs sharing an `id`** so the
+client upserts one row instead of appending two. They are **ephemeral**: `ChatService` forwards
+them but never persists them, so a reloaded chat renders the answer and citations only. Labels are
+deliberately plain-language ("Searching your documents") because a user reads them; the specific
+fact ("Hindi, typed in English letters") goes in `detail`, which the UI shows in its collapsed
+summary.
+
+**Settings.** `RELEVANCE_GRADER`, `RELEVANCE_SCORE_THRESHOLD` (default `0.35`), `AGENT_MAX_REPAIRS`
+(default `1`). ⚠️ The threshold is a conservative starting point, **not a measured optimum**, and
+it is now live. Calibrate it against the eval before trusting the repair loop's firing rate.
 
 ---
 
 ## 2. Low-Level Design — module map
 
 ```text
+agent/        agentic RAG orchestration — the ONLY orchestration (see §1.9)
+  events.py              Token / Step / Done + emit() over LangGraph's custom channel
+  state.py               AgentState, AgentUpdate (partial writes), AgentResult
+  grading/               RelevanceGrader port; score_threshold (free, default) + llm adapters
+  repair.py              choose_repair — raw_fallback / relanguage / rewrite (a pure function)
+  nodes.py               RagNodes — the 7 node coroutines + 2 edge routers
+  graph.py               build_graph (topology) + RagGraph facade (answer / stream)
+  factory.py             build_rag_graph — the single place the whole stack is constructed
 api/          HTTP boundary
   app.py                 create_app() factory; AppError→ErrorResponse handler; CORS;
                          SecurityHeadersMiddleware (HSTS in prod); optional embedding warm-up
@@ -305,16 +428,20 @@ vectorstores/ port + adapter
                          reload-on-change for multi-process (api + worker) safety
   factory.py             build_vector_store
 retrieval/    query-time
-  service.py             RetrievalService.retrieve → RetrievalContext (detect → transliterate)
+  base.py                Retriever protocol (route + retrieve)
+  routing.py             LanguageRoute + route_query — the transliteration decision, as a value
+  service.py             RetrievalService.route / .retrieve → RetrievalContext
   context.py             format_context — numbers chunks [1] [2] … for citation
 generation/   port + adapters
-  base.py                AnswerGenerator protocol
-  openai_compatible_generator.py  any chat.completions endpoint (NIM default) + error mapping
-  streaming.py           StreamingAnswerGenerator (AsyncOpenAI) → Token* then Done
+  base.py                AnswerGenerator + StreamClient protocols
+  openai_compatible_generator.py  any chat.completions endpoint (NIM default) + error mapping;
+                         blocking OpenAICompatibleChatClient + async OpenAICompatibleStreamClient
+                         (streaming.py deleted — the graph replaced it)
   contextualize.py       condense a follow-up into a standalone query
   citations.py           [n]-marker parsing → AnswerCitation
   language.py            resolve_answer_language + normalize_language_code
-  prompts.py             SYSTEM_INSTRUCTIONS + build_answer_prompt
+  prompts.py             SYSTEM_INSTRUCTIONS + build_answer_prompt; NO_CONTEXT_SYSTEM +
+                         build_no_context_prompt (the agent's give-up path)
 transliteration/ port + adapters + factory
   base.py                Transliterator protocol
   detect.py              detect_target_language (word-list / muril / google)
@@ -353,21 +480,23 @@ Every model is **frozen** (`ConfigDict(frozen=True)`) and collections are **`tup
 
 ### 2.2 Dependency injection — `app.state` is the seam
 
-This codebase does **not** use FastAPI `dependency_overrides`. Each route has a module-level
-`get_*_service(request, …)` helper that returns `request.app.state.<attr>` if present, else
-constructs the real dependency. Tests attach fakes to `app.state`:
+This codebase does **not** use FastAPI `dependency_overrides`. Each route has a module-level `get_*`
+helper that returns `request.app.state.<attr>` if present, else constructs the real dependency. The
+shared one lives in `api/dependencies.py::get_rag_graph`, because all three routes need it. Tests
+attach fakes to `app.state`:
 
 ```python
 app = create_app(Settings(environment="test"))
-app.state.query_service      = FakeQueryService()
+app.state.rag_graph          = FakeRagGraph()   # async answer() -> AgentResult; stream()
 app.state.document_service   = FakeDocumentService()
 app.state.chat_service       = FakeChatService()
 app.state.current_user       = UserRecord(user_id="user-1", email="u@example.com")
 app.state.enqueue_ingestion  = enqueued_jobs.append   # bypass Celery
 ```
 
-Recognized attrs: `settings`, `query_service`, `document_service`, `chat_service`,
-`streaming_answerer`, `current_user`, `enqueue_ingestion`.
+Recognized attrs: `settings`, `rag_graph`, `document_service`, `chat_service`, `current_user`,
+`enqueue_ingestion`. `query_service` and `streaming_answerer` are **gone** — one graph replaced
+both, and with them the double-construction hazard they papered over.
 
 The query service is also **memoized** on `app.state` on first build, so the Chroma client and the
 2.2 GB embedding model aren't rebuilt per request. It is lazy (not built in the lifespan) so the
@@ -528,6 +657,20 @@ through the actual `VectorStore` and queries through the actual `RetrievalServic
 quality is *measured* rather than assumed. It takes the ports, so tests inject fakes and the real
 run uses bge-m3 + Chroma for free.
 
+**What it does *not* see — read this before quoting a number.** `harness.py` constructs
+`RetrievalService` directly and calls `.retrieve()` in a plain loop; it never touches any
+orchestrator. It also passes **no transliterator**, so the romanized path is disabled there
+entirely (those numbers come from `scripts/eval_romanized.py`, which goes lower still and hits the
+vector store directly). Two consequences:
+
+- An orchestration change is **invisible** here. "The eval stayed green" across the agent-graph
+  work is a vacuous claim — the numbers physically cannot move.
+- Once the graph is wired, the headline `recall@k` will describe raw single-shot retrieval while
+  production runs route → retrieve → grade → repair. It will no longer describe what ships.
+
+The planned fix is a fifth `agentic` condition in `scripts/eval_romanized.py`, which already scores
+native / romanized-raw / transliterated / shipped against a retention bar.
+
 ```powershell
 python -m multilingual_rag.evaluation.run --live --langs en zh --k 5
 ```
@@ -627,6 +770,14 @@ tests/                  unit/ · integration/ (no conftest.py)
 - **`get_settings()` is cached.** Construct `Settings(...)` in tests; don't mutate env.
 - **Chroma metadata must be flat scalars.** Nested values are dropped, not raised on.
 - **Chunk writes must stay in sync with vector upserts**, or `document_chunks` lies.
+- **`detect_target_language` calls `asyncio.run` internally** (`transliteration/detect.py:129-137`,
+  the `google` path). Every caller must be inside a thread. The default `word-list` detector takes
+  no such path, so a violation passes the whole suite and fails only in production.
+- **Package `__init__.py` files are docstring-only.** Re-exports in `agent/__init__.py` created a
+  real import cycle via `generation.streaming` → `agent.events`. Import from the submodule.
+- **LangGraph silently ignores unknown keys** returned by a node, so a typo'd state key never
+  raises — it just leaves the value stale. Hence the `AgentUpdate` TypedDict, which makes mypy
+  catch it.
 - **`/v1/query` is not chat-scoped** the way the chat path is — it searches all of a user's chunks.
   Two retrieval paths with different scoping semantics.
 - **`delete_chat_document`** passes `session_id` to the vector store, but `DocumentRepository.delete`

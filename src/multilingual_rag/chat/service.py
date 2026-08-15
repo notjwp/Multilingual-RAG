@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
 from fastapi import status
 
+from multilingual_rag.agent.events import AgentEvent, Done, Step, Token
+from multilingual_rag.agent.state import AgentResult
 from multilingual_rag.chat.repository import ChatSessionRepository, MessageRepository
 from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import (
@@ -17,29 +18,29 @@ from multilingual_rag.core.models import (
     GeneratedAnswer,
     MessageRecord,
 )
-from multilingual_rag.generation.streaming import Done, StreamEvent, Token
 
 DEFAULT_TITLE = "New chat"
 DEFAULT_HISTORY_MAX_MESSAGES = 10
 
 
-class QueryAnswerer(Protocol):
-    """The RAG orchestrator ChatService needs — satisfied by ``RagQueryService``."""
+class RagAnswerer(Protocol):
+    """The RAG orchestrator ChatService needs — satisfied by ``RagGraph``.
 
-    def answer(
+    One protocol for both paths, because there is now one orchestrator. Previously this was two
+    (``QueryAnswerer`` + ``StreamingAnswerer``) pointing at two separate implementations.
+    """
+
+    async def answer(
         self,
         query: str,
         *,
         user_id: str,
         session_id: str | None = None,
+        preferred_language: str | None = None,
         history: Sequence[ConversationTurn] = (),
-    ) -> GeneratedAnswer:
+    ) -> AgentResult:
         """Retrieve context and generate a grounded answer, optionally with prior turns."""
         ...
-
-
-class StreamingAnswerer(Protocol):
-    """The streaming RAG orchestrator — satisfied by ``StreamingAnswerGenerator``."""
 
     def stream(
         self,
@@ -47,9 +48,10 @@ class StreamingAnswerer(Protocol):
         *,
         user_id: str,
         session_id: str | None = None,
+        preferred_language: str | None = None,
         history: Sequence[ConversationTurn] = (),
-    ) -> AsyncIterator[StreamEvent]:
-        """Retrieve context and stream a grounded answer as ``Token``s then a ``Done``."""
+    ) -> AsyncIterator[AgentEvent]:
+        """Stream agent steps and answer tokens, then the assembled ``Done``."""
         ...
 
 
@@ -61,13 +63,20 @@ class TokenChunk:
 
 
 @dataclass(frozen=True)
+class StepChunk:
+    """One agent step, forwarded live to the client. Never persisted."""
+
+    step: Step
+
+
+@dataclass(frozen=True)
 class CompletedMessage:
     """The persisted assistant turn, emitted once streaming finishes."""
 
     message: MessageRecord
 
 
-ChatStreamEvent = TokenChunk | CompletedMessage
+ChatStreamEvent = TokenChunk | StepChunk | CompletedMessage
 
 
 class ChatService:
@@ -78,14 +87,12 @@ class ChatService:
         *,
         session_repository: ChatSessionRepository,
         message_repository: MessageRepository,
-        query_service: QueryAnswerer,
-        streaming_answerer: StreamingAnswerer | None = None,
+        answerer: RagAnswerer,
         history_max_messages: int = DEFAULT_HISTORY_MAX_MESSAGES,
     ) -> None:
         self.session_repository = session_repository
         self.message_repository = message_repository
-        self.query_service = query_service
-        self.streaming_answerer = streaming_answerer
+        self.answerer = answerer
         self.history_max_messages = history_max_messages
 
     async def _history(self, session_id: str) -> tuple[ConversationTurn, ...]:
@@ -124,20 +131,15 @@ class ChatService:
         session = await self.session_repository.get(user_id=user_id, session_id=session_id)
         history = await self._history(session_id)  # prior turns, before this one is stored
         await self.message_repository.add(session_id=session_id, role="user", content=query)
-        # The RAG core is sync (local embeddings + a generation HTTP call) — offload it so it
-        # doesn't stall the event loop (same as the /v1/query route).
-        answer = await asyncio.to_thread(
-            self.query_service.answer,
-            query,
-            user_id=user_id,
-            session_id=session_id,
-            history=history,
+        # No to_thread here: the graph is async and offloads its own blocking calls per node.
+        result = await self.answerer.answer(
+            query, user_id=user_id, session_id=session_id, history=history
         )
         assistant = await self.message_repository.add(
             session_id=session_id,
             role="assistant",
-            content=answer.answer,
-            citations=answer.citations,
+            content=result.answer.answer,
+            citations=result.answer.citations,
         )
         # Name a fresh session after its first message so the sidebar isn't a wall of "New chat".
         if session.title == DEFAULT_TITLE:
@@ -151,26 +153,25 @@ class ChatService:
     ) -> AsyncIterator[ChatStreamEvent]:
         """Stream the answer token-by-token, persisting both turns once it completes.
 
-        Forwards each ``Token`` as a ``TokenChunk``; on the final ``Done`` it persists the
-        assistant turn (with citations), auto-titles a fresh session, and yields the persisted
-        message as a ``CompletedMessage``.
+        Forwards each ``Step`` as a ``StepChunk`` and each ``Token`` as a ``TokenChunk``; on the
+        final ``Done`` it persists the assistant turn (with citations), auto-titles a fresh
+        session, and yields the persisted message as a ``CompletedMessage``.
+
+        Steps are **ephemeral** — forwarded live and never written to the database, so reloading
+        a chat shows the answer and its citations, nothing else.
         """
-        if self.streaming_answerer is None:
-            raise AppError(
-                "Streaming is not configured for this chat service.",
-                code="streaming_unavailable",
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
         session = await self.session_repository.get(user_id=user_id, session_id=session_id)
         history = await self._history(session_id)  # prior turns, before this one is stored
         await self.message_repository.add(session_id=session_id, role="user", content=query)
 
         generated: GeneratedAnswer | None = None
-        async for event in self.streaming_answerer.stream(
+        async for event in self.answerer.stream(
             query, user_id=user_id, session_id=session_id, history=history
         ):
             if isinstance(event, Token):
                 yield TokenChunk(event.text)
+            elif isinstance(event, Step):
+                yield StepChunk(event)
             elif isinstance(event, Done):
                 generated = event.answer
         if generated is None:  # the generator raises on an empty answer, so this is defensive

@@ -71,3 +71,14 @@ export interface ApiErrorBody {
   message: string;
   details?: Record<string, unknown>;
 }
+
+// One step the agent streamed while working on an answer (SSE `event: step`). Ephemeral — these
+// are never persisted, so a reloaded chat shows only the answer and its citations.
+// `id` is stable across the running→done pair, so the client upserts rather than appending twice.
+export interface AgentStep {
+  id: string;
+  node: "condense" | "route_language" | "retrieve" | "grade" | "repair" | "generate";
+  status: "running" | "done";
+  label: string;
+  detail?: string | null;
+}

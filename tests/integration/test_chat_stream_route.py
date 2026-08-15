@@ -8,8 +8,14 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
+from multilingual_rag.agent.events import Step
 from multilingual_rag.api.app import create_app
-from multilingual_rag.chat.service import ChatStreamEvent, CompletedMessage, TokenChunk
+from multilingual_rag.chat.service import (
+    ChatStreamEvent,
+    CompletedMessage,
+    StepChunk,
+    TokenChunk,
+)
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import (
@@ -111,3 +117,50 @@ def test_stream_requires_authentication() -> None:
     with TestClient(app) as client:
         response = client.post("/v1/chats/chat-1/messages/stream", json={"query": "x"})
     assert response.status_code == 401
+
+
+class FakeSteppingChatService(FakeStreamingChatService):
+    """Emits an agent step before the tokens, the way the graph does."""
+
+    async def stream_message(
+        self, *, user_id: str, session_id: str, query: str
+    ) -> AsyncIterator[ChatStreamEvent]:
+        yield StepChunk(
+            Step(
+                id="retrieve:1",
+                node="retrieve",
+                status="running",
+                label="Searching your documents",
+            )
+        )
+        yield StepChunk(
+            Step(
+                id="retrieve:1",
+                node="retrieve",
+                status="done",
+                label="Searching your documents",
+                detail="8 passages found",
+            )
+        )
+        yield TokenChunk("Bharat is a nation.")
+        yield CompletedMessage(_message("assistant", "Bharat is a nation.", ()))
+
+
+def test_stream_emits_step_frames_before_the_tokens() -> None:
+    app = create_app(Settings(environment="test"))
+    app.state.chat_service = FakeSteppingChatService()
+    app.state.current_user = UserRecord(user_id="user-1", email="user@example.com")
+
+    with TestClient(app) as client:
+        response = client.post("/v1/chats/chat-1/messages/stream", json={"query": "q"})
+
+    events = _parse_sse(response.text)
+    names = [name for name, _ in events]
+    assert names == ["step", "step", "message", "done"]
+
+    running, done_step = events[0][1], events[1][1]
+    assert running["status"] == "running"
+    assert running["label"] == "Searching your documents"
+    # running/done share an id so the client upserts one row rather than appending two.
+    assert done_step["id"] == running["id"] == "retrieve:1"
+    assert done_step["detail"] == "8 passages found"

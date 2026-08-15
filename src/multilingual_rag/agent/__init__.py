@@ -1,1 +1,1 @@
-"""Agentic RAG orchestration — the graph that replaced the hand-rolled query pipeline."""
+"""Agentic RAG orchestration: the graph that replaces the hand-rolled query pipeline."""

@@ -1,36 +1,60 @@
+from collections.abc import Sequence
+
 from fastapi.testclient import TestClient
 
+from multilingual_rag.agent.state import AgentResult
 from multilingual_rag.api.app import create_app
-from multilingual_rag.api.routes.query import QueryRequest, QueryResponse, RagQueryService
+from multilingual_rag.api.routes.query import query_response_from_models
 from multilingual_rag.core.config import Settings
-from multilingual_rag.core.models import GeneratedAnswer, RetrievalContext, UserRecord
+from multilingual_rag.core.models import (
+    ConversationTurn,
+    GeneratedAnswer,
+    RetrievalContext,
+    UserRecord,
+)
+from multilingual_rag.vectorstores.base import VectorFilter
 
 
-class FakeQueryService:
-    def __init__(self) -> None:
-        self.requests: list[tuple[QueryRequest, str]] = []
+class FakeRagGraph:
+    """Stands in for RagGraph on app.state — records what the route passed down."""
 
-    def answer_query(self, request: QueryRequest, *, user_id: str) -> QueryResponse:
-        self.requests.append((request, user_id))
-        return QueryResponse(
-            answer="Test answer",
-            language=request.preferred_language or "en",
-            query_language="en",
-            citations=(),
-            retrieved_chunks=(),
+    def __init__(self, *, answer: str = "Test answer", language: str = "en") -> None:
+        self._answer = answer
+        self._language = language
+        self.calls: list[tuple[str, str, int | None, VectorFilter | None, str | None]] = []
+
+    async def answer(
+        self,
+        query: str,
+        *,
+        user_id: str,
+        session_id: str | None = None,
+        preferred_language: str | None = None,
+        top_k: int | None = None,
+        filters: VectorFilter | None = None,
+        history: Sequence[ConversationTurn] = (),
+    ) -> AgentResult:
+        self.calls.append((query, user_id, top_k, filters, preferred_language))
+        return AgentResult(
+            answer=GeneratedAnswer(
+                answer=self._answer,
+                language=preferred_language or self._language,
+                citations=(),
+            ),
+            context=RetrievalContext(query=query, query_language="en", results=()),
         )
 
 
-def _authed_app() -> tuple[object, FakeQueryService]:
+def _authed_app() -> tuple[object, FakeRagGraph]:
     app = create_app(Settings(environment="test"))
-    service = FakeQueryService()
-    app.state.query_service = service
+    graph = FakeRagGraph()
+    app.state.rag_graph = graph
     app.state.current_user = UserRecord(user_id="user-1", email="user@example.com")
-    return app, service
+    return app, graph
 
 
 def test_query_route_authenticates_and_passes_user_id() -> None:
-    app, service = _authed_app()
+    app, graph = _authed_app()
 
     with TestClient(app) as client:
         response = client.post(
@@ -46,14 +70,14 @@ def test_query_route_authenticates_and_passes_user_id() -> None:
     assert response.status_code == 200
     assert response.json()["answer"] == "Test answer"
     assert response.json()["language"] == "fr"
-    request, user_id = service.requests[0]
-    assert request.filters == {"language": "en"}
-    # The authenticated user's id must reach the query service.
+    query, user_id, top_k, filters, preferred = graph.calls[0]
+    assert (query, top_k, filters, preferred) == ("What is RAG?", 3, {"language": "en"}, "fr")
+    # The authenticated user's id must reach the graph.
     assert user_id == "user-1"
 
 
 def test_response_surfaces_transliteration_fields() -> None:
-    # RagQueryService must map RetrievalContext's transliteration transparency into the response.
+    # The response mapper must carry RetrievalContext's transliteration transparency through.
     context = RetrievalContext(
         query="bharat kya hai",
         query_language="en",
@@ -61,20 +85,9 @@ def test_response_surfaces_transliteration_fields() -> None:
         transliterated_query="भारत क्या है",
         transliteration_applied=True,
     )
+    answer = GeneratedAnswer(answer="ans", language="hi", citations=())
 
-    class _Retrieval:
-        def retrieve(self, *args: object, **kwargs: object) -> RetrievalContext:
-            return context
-
-    class _Gen:
-        def generate_answer(self, *args: object, **kwargs: object) -> GeneratedAnswer:
-            return GeneratedAnswer(answer="ans", language="hi", citations=())
-
-    service = RagQueryService(
-        retrieval_service=_Retrieval(),  # type: ignore[arg-type]
-        answer_generator=_Gen(),  # type: ignore[arg-type]
-    )
-    response = service.answer_query(QueryRequest(query="bharat kya hai"), user_id="user-1")
+    response = query_response_from_models(answer, context)
 
     assert response.transliteration_applied is True
     assert response.transliterated_query == "भारत क्या है"
@@ -83,7 +96,7 @@ def test_response_surfaces_transliteration_fields() -> None:
 def test_query_route_requires_authentication() -> None:
     # No app.state.current_user override and no bearer token -> must be rejected.
     app = create_app(Settings(environment="test"))
-    app.state.query_service = FakeQueryService()
+    app.state.rag_graph = FakeRagGraph()
 
     with TestClient(app) as client:
         response = client.post("/v1/query", json={"query": "What is RAG?"})
@@ -97,19 +110,13 @@ def test_query_route_rejects_reserved_user_id_filter() -> None:
     app = create_app(Settings(environment="test"))
     app.state.current_user = UserRecord(user_id="user-1", email="user@example.com")
 
-    # The reserved-filter guard fires before any retrieval, so these must never be called.
     class _Boom:
-        def retrieve(self, *args: object, **kwargs: object) -> object:
-            raise AssertionError("retrieval must not run for a rejected filter")
+        """The guard fires before the graph runs, so this must never be invoked."""
 
-    class _Gen:
-        def generate_answer(self, *args: object, **kwargs: object) -> object:
-            raise AssertionError("generation must not run for a rejected filter")
+        async def answer(self, *args: object, **kwargs: object) -> AgentResult:
+            raise AssertionError("the graph must not run for a rejected filter")
 
-    app.state.query_service = RagQueryService(
-        retrieval_service=_Boom(),  # type: ignore[arg-type]
-        answer_generator=_Gen(),  # type: ignore[arg-type]
-    )
+    app.state.rag_graph = _Boom()
 
     with TestClient(app) as client:
         response = client.post(

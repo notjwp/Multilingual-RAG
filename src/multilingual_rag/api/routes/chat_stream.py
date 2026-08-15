@@ -10,29 +10,28 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import asdict
 from typing import Protocol, cast
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from multilingual_rag.api.dependencies import get_rag_graph
 from multilingual_rag.api.routes.chat import SendMessageRequest
-from multilingual_rag.api.routes.query import RagQueryService, get_query_service
 from multilingual_rag.auth.dependencies import get_current_user
 from multilingual_rag.chat.repository import ChatSessionRepository, MessageRepository
 from multilingual_rag.chat.service import (
     ChatService,
     ChatStreamEvent,
     CompletedMessage,
-    QueryAnswerer,
-    StreamingAnswerer,
+    StepChunk,
     TokenChunk,
 )
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import ChatSessionRecord, MessageRecord, UserRecord
 from multilingual_rag.db.session import get_session
-from multilingual_rag.generation.streaming import StreamingAnswerGenerator
 
 router = APIRouter(prefix="/v1/chats", tags=["chats"])
 CURRENT_USER_DEPENDENCY = Depends(get_current_user)
@@ -73,6 +72,10 @@ async def stream_message(
             ):
                 if isinstance(event, TokenChunk):
                     yield _sse(data={"token": event.text})
+                elif isinstance(event, StepChunk):
+                    # Ephemeral: shown live, never persisted. Clients that don't know this event
+                    # ignore it — the frontend's frame dispatcher drops unknown event names.
+                    yield _sse(event="step", data=asdict(event.step))
                 elif isinstance(event, CompletedMessage):
                     await session.commit()
                     yield _sse(
@@ -102,29 +105,13 @@ def get_streaming_chat_service(
     existing_service = getattr(request.app.state, "chat_service", None)
     if existing_service is not None:
         return cast(StreamingChatServiceProtocol, existing_service)
-    query_service = get_query_service(request)
     settings = cast(Settings, request.app.state.settings)
     return ChatService(
         session_repository=ChatSessionRepository(session),
         message_repository=MessageRepository(session),
-        query_service=cast(QueryAnswerer, query_service),
-        streaming_answerer=_get_streaming_answerer(request, query_service),
+        answerer=get_rag_graph(request),
         history_max_messages=settings.chat_history_max_messages,
     )
-
-
-def _get_streaming_answerer(request: Request, query_service: object) -> StreamingAnswerer:
-    """Build the streaming answerer once, reusing the query service's retrieval wiring."""
-    existing = getattr(request.app.state, "streaming_answerer", None)
-    if existing is not None:
-        return cast(StreamingAnswerer, existing)
-    settings = cast(Settings, request.app.state.settings)
-    # In production get_query_service returns a RagQueryService; reuse its retrieval_service so
-    # the local embedding model isn't loaded a second time.
-    retrieval_service = cast(RagQueryService, query_service).retrieval_service
-    answerer = StreamingAnswerGenerator(settings, retrieval_service=retrieval_service)
-    request.app.state.streaming_answerer = answerer
-    return answerer
 
 
 def _sse(*, data: dict[str, object], event: str | None = None) -> str:

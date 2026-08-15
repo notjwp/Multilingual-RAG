@@ -45,13 +45,19 @@ Postgres and Redis must be running for anything touching documents or auth; `doc
 
 Request → route → service → protocol-typed adapter. Layers only depend downward, and every external system sits behind a `Protocol` port.
 
-**Ports and adapters.** `embeddings/base.py`, `vectorstores/base.py`, `generation/base.py`, and `transliteration/base.py` each define a `Protocol` (`EmbeddingProvider`, `VectorStore`, `AnswerGenerator`, `Transliterator`); `bge_embeddings.py`, `chroma_store.py`, `openai_compatible_generator.py`, and the `transliteration/` adapters are the concretes. Each has a `build_*` factory that selects the adapter from `Settings`. Services receive these through keyword-only constructor injection and never import an adapter directly — depend on the protocol so tests can pass fakes.
+**Ports and adapters.** `embeddings/base.py`, `vectorstores/base.py`, `generation/base.py`, `transliteration/base.py`, `retrieval/base.py`, and `agent/grading/base.py` each define a `Protocol` (`EmbeddingProvider`, `VectorStore`, `AnswerGenerator` + `StreamClient`, `Transliterator`, `Retriever`, `RelevanceGrader`); `bge_embeddings.py`, `chroma_store.py`, `openai_compatible_generator.py`, the `transliteration/` adapters, `RetrievalService`, and the two graders are the concretes. Each has a `build_*` factory that selects the adapter from `Settings`. Services receive these through keyword-only constructor injection and never import an adapter directly — depend on the protocol so tests can pass fakes.
 
-**Sync core, async edge.** The whole RAG core — ingestion, chunking, embedding, Chroma, retrieval, generation — is synchronous. Only the API, DB session, and repository layer is `async`. So `RagQueryService.answer_query` is a sync method called from an async route, and the Celery task bridges back with `asyncio.run()` in `workers/celery_app.py`. Keep new core logic sync; keep `async` at the HTTP/DB boundary.
+**Sync core, async edge.** The RAG core — ingestion, chunking, embedding, Chroma, retrieval — is synchronous; the API, DB session, and repository layer are `async`. Keep new core logic sync; keep `async` at the HTTP/DB boundary. **The orchestrator is the exception:** the agent graph's nodes are async and push the sync core down with `asyncio.to_thread` *inside the node that blocks*, rather than a route offloading a whole sync service. Two nodes need it — `retrieve` (bge-m3 + Chroma) and `route_language`, because `detect_target_language` calls `asyncio.run` internally on the `google` path. The Celery task still bridges the other way with `asyncio.run()`.
+
+**The agent graph (`agent/`) is the only orchestration.** All three entry points — `POST /v1/query`, blocking chat, streaming chat — go through `agent/graph.py::RagGraph` (`answer()` / `stream()`), reached via `api/dependencies.py::get_rag_graph`. Nothing outside `agent/` imports LangGraph. Shape: `condense → route_language → retrieve → grade`, then `generate`, or `repair → retrieve` (a real cycle), or `generate_no_context` when repairs run out. `repair` (`agent/repair.py::choose_repair`, a pure function) is the differentiated part: on a weak retrieval it retries the raw untransliterated query, re-routes to another Indic language, or LLM-rewrites — in that order. Deliberately **no tools and no checkpointer**: retrieval is a node, so the model can never author `user_id`/`session_id` (tenancy is structural, not prompt-enforced), and history already lives in `messages`. Events (`agent/events.py`) go out over LangGraph's single `custom` stream channel via `emit()`, which no-ops under `ainvoke` and off-graph — that is why `generate` always streams internally and blocking callers just collect, with no `if streaming:` anywhere.
+
+**Agent steps are ephemeral.** `Step` events stream to the client as SSE `event: step` frames (running/done pairs sharing an `id`, so the UI upserts) and are **never persisted**. A reloaded chat shows the answer and its citations only. Don't add a `message_steps` table without a reason.
+
+**`RetrievalService.route()`** is split out of `retrieve` so the graph can make the transliteration decision as its own step and re-make it differently on a retry. `retrieve(..., route=None)` decides for itself, reproducing the old behaviour exactly — which is why the existing retrieval tests and both eval harnesses were untouched by the split.
 
 **One document path.** Documents go through `DatabaseDocumentIndexingService` (Postgres repositories + Celery). The legacy `DocumentIndexingService` + `DocumentStore` (a JSON file, no user scoping) was removed in Phase D — there is now a single source of truth.
 
-**Per-chat documents (M18).** Documents are scoped to a **single chat**, not the whole user: a file uploaded into a chat only grounds *that* chat's answers. `documents`/`ingestion_jobs` carry a nullable `session_id` FK (`ondelete=CASCADE`, so deleting a chat drops its docs), the dedup constraint is `(user_id, session_id, checksum)`, and the content-addressed `document_id` folds in `session_id`. A `session_id` threads through the vector store (`VectorStore` methods take `session_id`; the Chroma adapter AND-s a `session_id` metadata filter into the `where` clause and folds it into the storage id) and through retrieval → `RagQueryService.answer` / `StreamingAnswerGenerator.stream` (both take `session_id`) so a chat retrieves only its own chunks. There is no user-wide document library and no global `/v1/documents` route.
+**Per-chat documents (M18).** Documents are scoped to a **single chat**, not the whole user: a file uploaded into a chat only grounds *that* chat's answers. `documents`/`ingestion_jobs` carry a nullable `session_id` FK (`ondelete=CASCADE`, so deleting a chat drops its docs), the dedup constraint is `(user_id, session_id, checksum)`, and the content-addressed `document_id` folds in `session_id`. A `session_id` threads through the vector store (`VectorStore` methods take `session_id`; the Chroma adapter AND-s a `session_id` metadata filter into the `where` clause and folds it into the storage id) and through retrieval → the agent graph's `answer()` / `stream()` (both take `session_id`, carried in `AgentState`) so a chat retrieves only its own chunks. There is no user-wide document library and no global `/v1/documents` route.
 
 **Upload is asynchronous.** `POST /v1/chats/{chat_id}/documents` (in `api/routes/chat_documents.py`) verifies chat ownership, saves bytes to `raw_document_directory`, creates a `queued` ingestion job row scoped to the chat, enqueues Celery, and returns a `job_id` — it does *not* index inline. The worker runs `documents/jobs.py::run_ingestion_job`: ingest → embed → vector upsert (scoped by `user_id`+`session_id`) → write `documents`/`document_chunks` rows → mark succeeded/failed. Clients poll `GET /v1/ingestion-jobs/{job_id}`. The `document_chunks` table mirrors vector metadata for traceability, so chunk writes must stay in sync with vector upserts.
 
@@ -61,17 +67,17 @@ Request → route → service → protocol-typed adapter. Layers only depend dow
 
 ## Conventions
 
-**`app.state` is the injection seam.** This codebase does not use FastAPI `dependency_overrides`. Routes call a module-level `get_*_service(request, ...)` helper (`get_query_service(request)`, `get_document_service(request, session)`) that returns `request.app.state.<attr>` when set and otherwise constructs the real dependency. Tests attach fakes to `app.state`:
+**`app.state` is the injection seam.** This codebase does not use FastAPI `dependency_overrides`. Routes call a module-level `get_*` helper (`get_rag_graph(request)` in `api/dependencies.py`, `get_document_service(request, session)`) that returns `request.app.state.<attr>` when set and otherwise constructs the real dependency. Tests attach fakes to `app.state`:
 
 ```python
 app = create_app(Settings(environment="test"))
-app.state.query_service = FakeQueryService()
+app.state.rag_graph = FakeRagGraph()                 # async answer() -> AgentResult; stream()
 app.state.document_service = FakeDocumentService()
 app.state.current_user = UserRecord(user_id="user-1", email="user@example.com")
 app.state.enqueue_ingestion = enqueued_jobs.append   # bypasses Celery
 ```
 
-Recognized attrs: `settings`, `query_service`, `document_service`, `current_user`, `enqueue_ingestion`. When adding a route with a new dependency, follow this pattern — declare a `Protocol` for the service, add the `get_*` fallback helper, and hang the override off `app.state`. There is no `conftest.py`; tests build their own app and fakes are plain classes, not mocks.
+Recognized attrs: `settings`, `rag_graph`, `chat_service`, `document_service`, `current_user`, `enqueue_ingestion`. (`query_service` and `streaming_answerer` are gone — one graph replaced both.) When adding a route with a new dependency, follow this pattern — declare a `Protocol` for the service, add the `get_*` fallback helper, and hang the override off `app.state`. There is no `conftest.py`; tests build their own app and fakes are plain classes, not mocks.
 
 **Errors.** Raise `AppError(message, code="snake_case_code", status_code=...)`, never `HTTPException`. A single handler in `api/app.py` renders it as `ErrorResponse`. The `code` is part of the API contract.
 
@@ -81,7 +87,9 @@ Recognized attrs: `settings`, `query_service`, `document_service`, `current_user
 
 **Import-time side effects.** `db/session.py` and `workers/celery_app.py` call `get_settings()` and create engines at module import. Importing anything that transitively pulls in `db.session` reads `.env` and constructs an async engine, so avoid importing them in tests that shouldn't need a database.
 
-**mypy is `strict = true`.** Untyped third-party libs (celery, chromadb) need `# type: ignore[...]` with the specific code. Keep `ruff` line length at 100.
+**mypy is `strict = true`.** Untyped third-party libs (celery, chromadb) need `# type: ignore[...]` with the specific code. Keep `ruff` line length at 100. **LangGraph needs none** — it ships `py.typed`, and `add_node` with a partial-`TypedDict` return plus `add_conditional_edges` with a `Literal`-annotated router both type-check clean. Two things to know: supply all four type args to `CompiledStateGraph[...]` (bare fails `disallow_any_generics`), and import `RunnableConfig` from `langchain_core.runnables` — `langgraph.types` re-exports it at runtime but omits it from `__all__`.
+
+**Package `__init__.py` files are docstring-only.** No re-exports anywhere — import from the submodule. This is not cosmetic: re-exports in `agent/__init__.py` created an import cycle (`generation.streaming` → `agent.events` → `agent/__init__` → `agent.factory` → … → `generation.streaming`).
 
 Migrations: `alembic/env.py` ignores the `sqlalchemy.url` in `alembic.ini` and derives the URL from `get_settings().database_url`, rewriting the async driver to sync (`postgresql+asyncpg` → `postgresql`). Configure migrations through `DATABASE_URL`.
 

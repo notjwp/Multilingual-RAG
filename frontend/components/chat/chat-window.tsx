@@ -12,7 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import * as api from "@/lib/api";
 import { useChats } from "@/lib/chats";
 import { streamMessage } from "@/lib/sse";
-import type { Message } from "@/lib/types";
+import type { AgentStep, Message } from "@/lib/types";
 
 function toUiMessage(m: Message): UiMessage {
   return {
@@ -21,7 +21,18 @@ function toUiMessage(m: Message): UiMessage {
     role: m.role,
     content: m.content,
     citations: m.citations,
+    // No `steps`: they're ephemeral, so history renders without them.
   };
+}
+
+// Steps stream as running→done pairs sharing an id; replace the matching one, else append.
+function upsertStep(steps: AgentStep[] | undefined, step: AgentStep): AgentStep[] {
+  const current = steps ?? [];
+  const at = current.findIndex((s) => s.id === step.id);
+  if (at === -1) return [...current, step];
+  const next = [...current];
+  next[at] = step;
+  return next;
 }
 
 // Mounted with `key={chatId}` so switching chats remounts it with fresh state.
@@ -73,6 +84,11 @@ export function ChatWindow({ chatId }: { chatId: string }) {
         setMessages((prev) =>
           prev.map((m) => (m.key === assistantKey ? { ...m, content: m.content + text } : m)),
         ),
+      // Steps arrive as running→done pairs sharing an id, so replace in place rather than append.
+      onStep: (step) =>
+        setMessages((prev) =>
+          prev.map((m) => (m.key === assistantKey ? { ...m, steps: upsertStep(m.steps, step) } : m)),
+        ),
       onDone: ({ message_id, citations }) => {
         completed = true;
         setMessages((prev) =>
@@ -108,7 +124,14 @@ export function ChatWindow({ chatId }: { chatId: string }) {
     setMessages((prev) => [
       ...prev,
       { key: crypto.randomUUID(), role: "user", content: query, citations: [] },
-      { key: assistantKey, role: "assistant", content: "", citations: [], pending: true },
+      {
+        key: assistantKey,
+        role: "assistant",
+        content: "",
+        citations: [],
+        steps: [],
+        pending: true,
+      },
     ]);
     await runStream(query, assistantKey, wasFirstTurn);
   }
@@ -123,7 +146,11 @@ export function ChatWindow({ chatId }: { chatId: string }) {
     if (!last || last.role !== "assistant" || !last.error) return;
     if (!prevUser || prevUser.role !== "user") return;
     setMessages((prev) =>
-      prev.map((m) => (m.key === last.key ? { ...m, content: "", error: false, pending: true } : m)),
+      prev.map((m) =>
+        m.key === last.key
+          ? { ...m, content: "", steps: [], error: false, pending: true }
+          : m,
+      ),
     );
     void runStream(prevUser.content, last.key, n <= 2);
   }

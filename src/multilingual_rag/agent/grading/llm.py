@@ -18,7 +18,7 @@ from openai import OpenAIError
 
 from multilingual_rag.agent.grading.base import Grade
 from multilingual_rag.core.models import VectorSearchResult
-from multilingual_rag.generation.streaming import StreamClient
+from multilingual_rag.generation.base import StreamClient
 
 GRADER_SYSTEM = (
     "You judge whether retrieved passages contain the information needed to answer a question. "

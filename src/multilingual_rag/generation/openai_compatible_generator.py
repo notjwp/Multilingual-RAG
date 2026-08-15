@@ -11,21 +11,23 @@ actionable error naming ``GENERATION_MODEL`` rather than a mystery 502.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Any, Protocol, cast
 
 from fastapi import status
-from openai import APITimeoutError, NotFoundError, OpenAI, OpenAIError, RateLimitError
+from openai import (
+    APITimeoutError,
+    AsyncOpenAI,
+    NotFoundError,
+    OpenAI,
+    OpenAIError,
+    RateLimitError,
+)
 
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import ConversationTurn, GeneratedAnswer, RetrievalContext
 from multilingual_rag.generation.citations import answer_citations
-from multilingual_rag.generation.contextualize import (
-    CONTEXTUALIZE_SYSTEM,
-    build_contextualize_prompt,
-    clean_standalone_query,
-)
 from multilingual_rag.generation.language import resolve_answer_language
 from multilingual_rag.generation.prompts import SYSTEM_INSTRUCTIONS, build_answer_prompt
 
@@ -109,6 +111,44 @@ class OpenAICompatibleChatClient:
         return response.choices[0].message.content or ""
 
 
+class OpenAICompatibleStreamClient:
+    """Async, ``stream=True`` counterpart of ``OpenAICompatibleChatClient``.
+
+    Satisfies the ``StreamClient`` port. Lives beside the blocking client because both wrap the
+    same endpoint and the same ``build_chat_messages`` assembly — only the transport differs.
+    """
+
+    def __init__(self, api_key: str, base_url: str, timeout: float = 60.0) -> None:
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+
+    async def astream_completion(
+        self,
+        *,
+        model: str,
+        system: str,
+        prompt: str,
+        history: Sequence[ConversationTurn] = (),
+    ) -> AsyncIterator[str]:
+        stream = await self._client.chat.completions.create(
+            model=model,
+            messages=cast(Any, build_chat_messages(system, prompt, history)),
+            stream=True,
+        )
+        async for chunk in stream:
+            if not chunk.choices:  # e.g. a trailing usage-only chunk carries no delta
+                continue
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+
+    async def acomplete(self, *, model: str, system: str, prompt: str) -> str:
+        response = await self._client.chat.completions.create(
+            model=model,
+            messages=cast(Any, build_chat_messages(system, prompt, ())),
+        )
+        return response.choices[0].message.content or ""
+
+
 class OpenAICompatibleAnswerGenerator:
     """Generate grounded answers. Satisfies the ``AnswerGenerator`` protocol."""
 
@@ -132,20 +172,6 @@ class OpenAICompatibleAnswerGenerator:
                 settings.generation_base_url,
                 settings.generation_timeout_seconds,
             )
-
-    def contextualize(self, history: Sequence[ConversationTurn], question: str) -> str:
-        """Rewrite a follow-up into a standalone query for retrieval (identity if no history)."""
-        if not history:
-            return question
-        try:
-            raw = self.client.create_completion(
-                model=self.model,
-                system=CONTEXTUALIZE_SYSTEM,
-                prompt=build_contextualize_prompt(history, question),
-            )
-        except OpenAIError as exc:
-            raise generation_app_error(exc, self.model) from exc
-        return clean_standalone_query(raw, fallback=question)
 
     def generate_answer(
         self,

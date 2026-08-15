@@ -3,12 +3,14 @@
 //
 // Wire format (from api/routes/chat_stream.py):
 //   token: `data: {"token":"…"}\n\n`                        (default event, no `event:` line)
+//   step:  `event: step\ndata: {"id":"…","node":"…","status":"running|done","label":"…",…}\n\n`
 //   done:  `event: done\ndata: {"message_id":"…","citations":[…]}\n\n`
 //   error: `event: error\ndata: {"error":"…","message":"…"}\n\n`
 // A missing/other-user chat is a 404 JSON body *before* the stream — so check res.ok first.
+// Unknown event names are dropped rather than throwing, so the backend can add frames first.
 
 import { API_BASE, ApiError, getToken } from "@/lib/api";
-import type { ApiErrorBody, Citation } from "@/lib/types";
+import type { AgentStep, ApiErrorBody, Citation } from "@/lib/types";
 
 export interface StreamDone {
   message_id: string;
@@ -19,6 +21,8 @@ export interface StreamHandlers {
   onToken: (text: string) => void;
   onDone: (done: StreamDone) => void;
   onError: (err: ApiError) => void;
+  // Optional so a caller that doesn't render agent steps needs no change.
+  onStep?: (step: AgentStep) => void;
   signal?: AbortSignal;
 }
 
@@ -92,6 +96,8 @@ function dispatchFrame(frame: string, handlers: StreamHandlers): void {
 
   if (event === "done") {
     handlers.onDone(parsed as StreamDone);
+  } else if (event === "step") {
+    handlers.onStep?.(parsed as AgentStep);
   } else if (event === "error") {
     const e = parsed as ApiErrorBody;
     handlers.onError(new ApiError(e.error ?? "generation_error", e.message ?? "Generation failed", 200));

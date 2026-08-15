@@ -51,6 +51,37 @@ The trickiest conceptual thing in the repo. The RAG **core is sync**; the **edge
 **Learn if unfamiliar:** `async`/`await`, event loop blocking, `asyncio.run`, why mixing sync
 CPU/IO into an event loop serializes it.
 
+- **The nastiest instance of this in the repo:** `detect_target_language` calls `asyncio.run`
+  *inside itself* (`transliteration/detect.py:129-137`, the googletrans path). It works only
+  because every caller happens to be inside `asyncio.to_thread` already. Call it from a coroutine
+  and it raises `RuntimeError: asyncio.run() cannot be called from a running event loop` — and
+  since the default `word-list` detector never reaches that code, the whole test suite stays green
+  while production breaks. Anything touching routing must offload.
+
+## ●●● LangGraph & the agent graph (`agent/`)
+
+**The only orchestration** — every question, from any of the three routes, runs through it
+(`docs/architecture.md §1.9`). Nothing outside `agent/` imports LangGraph.
+
+- **State is a `TypedDict`, and LangGraph silently ignores unknown keys** a node returns. A typo'd
+  key never raises; the value just stays stale. That is why nodes return `AgentUpdate`
+  (a `total=False` TypedDict) rather than `dict[str, Any]` — so mypy catches it.
+- **No reducers / no `Annotated` accumulators.** The graph is strictly sequential, so last-write
+  wins is correct. Reaching for `operator.add` here would be cargo cult.
+- **One `custom` stream channel** carries tokens *and* steps, because generation is the raw
+  `openai` SDK — `stream_mode="messages"` only sees LangChain `BaseChatModel` output.
+  `emit()` no-ops under `ainvoke` and off-graph, which is what lets one `generate` node serve both
+  the streaming and blocking routes with no `if streaming:`.
+- **mypy needs no ignores**, but two gotchas: give `CompiledStateGraph[...]` all four type args
+  (bare fails `disallow_any_generics`), and import `RunnableConfig` from `langchain_core.runnables`
+  — `langgraph.types` re-exports it at runtime but omits it from `__all__`.
+- **Conditional edges vs branches inside nodes.** "Skip condense on a first turn" is a conditional
+  *entry edge*, so it shows up in `draw_mermaid()` and can't be quietly deleted.
+
+**Learn if unfamiliar:** `StateGraph`, nodes vs edges, `add_conditional_edges`, cycles and
+`recursion_limit`, `astream` stream modes. Skip checkpointers and `ToolNode` — this graph
+deliberately uses neither (§1.9 explains why).
+
 ## ●● SQLAlchemy 2.x (async) + Alembic
 
 - Async ORM: `AsyncSession`, `async_sessionmaker`, `Mapped[...]` / `mapped_column`.

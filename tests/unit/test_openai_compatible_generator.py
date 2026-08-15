@@ -135,25 +135,9 @@ def test_requires_key_without_injected_client() -> None:
         OpenAICompatibleAnswerGenerator(Settings(environment="test", generation_api_key=None))
 
 
-def test_contextualize_rewrites_follow_up_with_history() -> None:
-    client = FakeChatClient(text='  "Who founded the Zorblax Protocol?"  ')
-    history = (
-        ConversationTurn(role="user", content="Tell me about the Zorblax Protocol"),
-        ConversationTurn(role="assistant", content="It is a fictional standard."),
-    )
-
-    standalone = _generator(client).contextualize(history, "who founded it?")
-
-    assert standalone == "Who founded the Zorblax Protocol?"  # stripped surrounding quotes/space
-    _, system, prompt = client.calls[0]
-    assert "standalone" in system.lower()  # the condense system prompt, not the answer prompt
-    assert "who founded it?" in prompt
-
-
-def test_contextualize_is_identity_and_skips_llm_without_history() -> None:
-    client = FakeChatClient()
-    assert _generator(client).contextualize((), "who founded it?") == "who founded it?"
-    assert client.calls == []  # no condense call on the first turn
+# Condensing moved to the agent graph's `condense` node — see tests/unit/test_agent_graph.py
+# (`test_first_turn_skips_condense_...` and `test_follow_up_condenses_...`). This generator is now
+# only the eval harness's blocking answer path.
 
 
 def test_generate_answer_forwards_history_to_client() -> None:

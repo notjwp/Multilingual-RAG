@@ -3,11 +3,9 @@ from collections.abc import AsyncIterator, Sequence
 
 from openai import APIError
 
-from multilingual_rag.agent.grading import (
-    LlmRelevanceGrader,
-    ScoreThresholdGrader,
-    build_relevance_grader,
-)
+from multilingual_rag.agent.grading.factory import build_relevance_grader
+from multilingual_rag.agent.grading.llm import LlmRelevanceGrader
+from multilingual_rag.agent.grading.score_threshold import ScoreThresholdGrader
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.models import ConversationTurn, VectorSearchResult
 

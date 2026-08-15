@@ -2,33 +2,22 @@
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Sequence
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, Field
 
+from multilingual_rag.api.dependencies import get_rag_graph
 from multilingual_rag.auth.dependencies import get_current_user
-from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import (
     AnswerCitation,
-    ConversationTurn,
     GeneratedAnswer,
     RetrievalContext,
     UserRecord,
     VectorSearchResult,
 )
-from multilingual_rag.embeddings.factory import build_embedding_provider
-from multilingual_rag.generation.base import AnswerGenerator
-from multilingual_rag.generation.openai_compatible_generator import (
-    OpenAICompatibleAnswerGenerator,
-)
-from multilingual_rag.retrieval.service import RetrievalService
-from multilingual_rag.transliteration.factory import build_transliterator
 from multilingual_rag.vectorstores.base import MetadataValue, VectorFilter
-from multilingual_rag.vectorstores.factory import build_vector_store
 
 router = APIRouter(prefix="/v1", tags=["query"])
 CURRENT_USER_DEPENDENCY = Depends(get_current_user)
@@ -81,121 +70,32 @@ class QueryResponse(BaseModel):
     transliteration_applied: bool = False
 
 
-class QueryService(Protocol):
-    """Protocol for API query orchestration."""
-
-    def answer_query(self, request: QueryRequest, *, user_id: str) -> QueryResponse:
-        """Answer one query request for a user."""
-        ...
-
-    def answer(
-        self,
-        query: str,
-        *,
-        user_id: str,
-        session_id: str | None = None,
-        history: Sequence[ConversationTurn] = (),
-    ) -> GeneratedAnswer:
-        """Retrieve context and generate a grounded answer as a domain model (used by chat)."""
-        ...
-
-
-class RagQueryService:
-    """Coordinate retrieval and generation for API queries."""
-
-    def __init__(
-        self,
-        *,
-        retrieval_service: RetrievalService,
-        answer_generator: AnswerGenerator,
-    ) -> None:
-        self.retrieval_service = retrieval_service
-        self.answer_generator = answer_generator
-
-    def answer_query(self, request: QueryRequest, *, user_id: str) -> QueryResponse:
-        """Retrieve context and generate an answer for a user's query."""
-        if request.filters and "user_id" in request.filters:
-            raise AppError(
-                "user_id is not an allowed filter.",
-                code="reserved_filter_key",
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
-        context = self.retrieval_service.retrieve(
-            request.query,
-            user_id=user_id,
-            top_k=request.top_k,
-            filters=cast(VectorFilter | None, request.filters),
-        )
-        generated_answer = self.answer_generator.generate_answer(
-            context=context,
-            preferred_language=request.preferred_language,
-        )
-        return query_response_from_models(generated_answer, context)
-
-    def answer(
-        self,
-        query: str,
-        *,
-        user_id: str,
-        session_id: str | None = None,
-        preferred_language: str | None = None,
-        history: Sequence[ConversationTurn] = (),
-    ) -> GeneratedAnswer:
-        """Retrieve context and generate a grounded answer as a domain model (used by chat).
-
-        Retrieval is scoped to the chat's own documents (``session_id``) when given, so a chat
-        only ever answers from what was uploaded into it. With prior turns, first condense the
-        follow-up into a standalone query for retrieval, then answer the user's actual wording
-        with the history in the prompt.
-        """
-        search_query = self.answer_generator.contextualize(history, query)
-        context = self.retrieval_service.retrieve(
-            search_query, user_id=user_id, session_id=session_id
-        )
-        if search_query != query:
-            context = context.model_copy(update={"query": query})
-        return self.answer_generator.generate_answer(
-            context=context, preferred_language=preferred_language, history=history
-        )
-
-
 @router.post("/query", response_model=QueryResponse)
 async def query(
     request_body: QueryRequest,
     request: Request,
     current_user: UserRecord = CURRENT_USER_DEPENDENCY,
 ) -> QueryResponse:
-    """Answer a user query with retrieval-augmented generation."""
-    query_service = get_query_service(request)
-    # The RAG core is synchronous and blocking (local bge-m3 embedding, Chroma search, a
-    # generation HTTP call) — offload it so it doesn't stall the event loop for other requests.
-    return await asyncio.to_thread(
-        query_service.answer_query, request_body, user_id=current_user.user_id
-    )
+    """Answer a user query with retrieval-augmented generation.
 
-
-def get_query_service(request: Request) -> QueryService:
-    """Return an injected or default query service, built once and memoized on app.state."""
-    existing_service = getattr(request.app.state, "query_service", None)
-    if existing_service is not None:
-        return cast(QueryService, existing_service)
-
-    settings = cast(Settings, request.app.state.settings)
-    vector_store = build_vector_store(settings)
-    retrieval_service = RetrievalService(
-        settings,
-        embedding_provider=build_embedding_provider(settings),
-        vector_store=vector_store,
-        transliterator=build_transliterator(settings),
+    No ``asyncio.to_thread`` here any more: the agent graph is async and offloads its own blocking
+    calls (embedding, Chroma search, and language routing) inside the nodes that make them.
+    """
+    if request_body.filters and "user_id" in request_body.filters:
+        # Tenancy is enforced server-side; a caller-supplied user_id filter is always a mistake.
+        raise AppError(
+            "user_id is not an allowed filter.",
+            code="reserved_filter_key",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    result = await get_rag_graph(request).answer(
+        request_body.query,
+        user_id=current_user.user_id,
+        preferred_language=request_body.preferred_language,
+        top_k=request_body.top_k,
+        filters=cast(VectorFilter | None, request_body.filters),
     )
-    service = RagQueryService(
-        retrieval_service=retrieval_service,
-        answer_generator=OpenAICompatibleAnswerGenerator(settings),
-    )
-    # Cache so the Chroma client and adapters aren't rebuilt on every request. Lazy (not in the
-    # lifespan) so the offline test suite never loads the 2.2 GB model at startup.
-    request.app.state.query_service = service
-    return service
+    return query_response_from_models(result.answer, result.context)
 
 
 def query_response_from_models(answer: GeneratedAnswer, context: RetrievalContext) -> QueryResponse:

@@ -9,10 +9,10 @@ from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from multilingual_rag.api.routes.query import get_query_service
+from multilingual_rag.api.dependencies import get_rag_graph
 from multilingual_rag.auth.dependencies import get_current_user
 from multilingual_rag.chat.repository import ChatSessionRepository, MessageRepository
-from multilingual_rag.chat.service import ChatService, QueryAnswerer
+from multilingual_rag.chat.service import ChatService
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.models import (
     AnswerCitation,
@@ -183,7 +183,7 @@ def get_chat_service(request: Request, session: AsyncSession) -> ChatServiceProt
     return ChatService(
         session_repository=ChatSessionRepository(session),
         message_repository=MessageRepository(session),
-        query_service=cast(QueryAnswerer, get_query_service(request)),
+        answerer=get_rag_graph(request),
         history_max_messages=settings.chat_history_max_messages,
     )
 

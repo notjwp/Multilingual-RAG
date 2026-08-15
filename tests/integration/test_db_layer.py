@@ -17,6 +17,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from multilingual_rag.agent.state import AgentResult
 from multilingual_rag.chat.repository import ChatSessionRepository, MessageRepository
 from multilingual_rag.chat.service import DEFAULT_TITLE, ChatService
 from multilingual_rag.core.config import Settings
@@ -27,6 +28,7 @@ from multilingual_rag.core.models import (
     DocumentRecord,
     GeneratedAnswer,
     IngestionResult,
+    RetrievalContext,
 )
 from multilingual_rag.core.models import (
     DocumentChunk as DomainChunk,
@@ -395,19 +397,27 @@ async def test_chat_get_is_user_scoped(session: AsyncSession) -> None:
 
 
 class _FakeAnswerer:
+    """Stands in for RagGraph — async now, and returning an AgentResult."""
+
     def __init__(self) -> None:
         self.histories: list[tuple[object, ...]] = []
 
-    def answer(
+    async def answer(
         self,
         query: str,
         *,
         user_id: str,
         session_id: str | None = None,
+        preferred_language: str | None = None,
         history: object = (),
-    ) -> GeneratedAnswer:
+    ) -> AgentResult:
         self.histories.append(tuple(history))  # type: ignore[arg-type]
-        return GeneratedAnswer(answer=f"reply: {query}", language="en", citations=(_citation(),))
+        return AgentResult(
+            answer=GeneratedAnswer(
+                answer=f"reply: {query}", language="en", citations=(_citation(),)
+            ),
+            context=RetrievalContext(query=query, query_language="en", results=()),
+        )
 
 
 async def test_send_message_persists_turns_and_auto_titles(session: AsyncSession) -> None:
@@ -415,7 +425,7 @@ async def test_send_message_persists_turns_and_auto_titles(session: AsyncSession
     service = ChatService(
         session_repository=ChatSessionRepository(session),
         message_repository=MessageRepository(session),
-        query_service=_FakeAnswerer(),
+        answerer=_FakeAnswerer(),
     )
     chat = await service.create_session(user_id="user-1")
     assert chat.title == DEFAULT_TITLE
@@ -439,7 +449,7 @@ async def test_send_message_feeds_prior_turns_as_history(session: AsyncSession) 
     service = ChatService(
         session_repository=ChatSessionRepository(session),
         message_repository=MessageRepository(session),
-        query_service=answerer,
+        answerer=answerer,
     )
     chat = await service.create_session(user_id="user-1")
 

@@ -86,10 +86,14 @@ flowchart TB
         Q[Your question] --> R[Convert to a vector]
         R --> S[Find the closest passages]
         D -.-> S
-        S --> T[Language model writes<br/>an answer from them]
+        S --> V{Good enough?}
+        V -->|no| W[Adjust the search] --> S
+        V -->|yes| T[Language model writes<br/>an answer from them]
         T --> U[Answer + citations]
     end
 ```
+
+That "good enough?" check is the agent — see [below](#the-agent-noticing-when-a-search-went-badly).
 
 ### The key idea: meaning becomes coordinates
 
@@ -192,6 +196,9 @@ Everything lives in `.env` (copy it from `.env.example`). The settings you're mo
 | `EMBEDDING_PROVIDER` | `bge-m3` (local, free, default) or `openai` |
 | `JWT_SECRET_KEY` | Login-token signing key. **Must** be changed for real deployments |
 | `RETRIEVAL_TOP_K` | How many passages to feed the model (default: 8) |
+| `RELEVANCE_GRADER` | How the agent judges a search: `score-threshold` (free, default) or `llm` |
+| `RELEVANCE_SCORE_THRESHOLD` | Below this score a search counts as weak and triggers a retry (default: 0.35, untuned) |
+| `AGENT_MAX_REPAIRS` | How many retries per question (default: 1 — raising it multiplies cost) |
 
 ---
 
@@ -281,13 +288,14 @@ src/multilingual_rag/
   retrieval/    finding relevant passages for a question
   generation/   prompting the model, parsing citations
   transliteration/  romanized Hindi/Kannada/Telugu handling
+  agent/        the retrieval graph — grades its own results and retries
   evaluation/   quality measurement
 frontend/       Next.js web app
 docs/           architecture, decisions, experiment write-ups
 ```
 
-**Built with:** Python 3.13 · FastAPI · Postgres · Redis · Celery · ChromaDB · sentence-transformers
-· Next.js 16 · React 19 · Tailwind
+**Built with:** Python 3.13 · FastAPI · LangGraph · Postgres · Redis · Celery · ChromaDB ·
+sentence-transformers · Next.js 16 · React 19 · Tailwind
 
 The codebase follows a **ports-and-adapters** structure: every external system (the vector database,
 the embedding model, the language model) sits behind an interface. That's why swapping providers is
@@ -311,6 +319,38 @@ against the most common deployment mistake.
 > **Upgrading from an older version?** You'll need to re-upload documents. Stored vectors are tagged
 > with both a user and a chat, and older ones lack those tags, so they're ignored by design. Clear
 > `data/chroma` and re-upload inside a chat.
+
+---
+
+## The agent: noticing when a search went badly
+
+A plain RAG system searches **once** per question. If that search comes back weak, it answers from
+weak passages anyway — it has no way to notice.
+
+This one grades its own search results and retries when they look poor. The interesting part is
+*how* it retries. Rather than generically rephrasing, it first asks **"did I guess the script
+wrong?"** — because for a romanized query like `bharat ki rajdhani kya hai`, converting to
+Devanagari is exactly the step that can fail. So it falls back to searching the original wording,
+or tries a different Indic language, before spending a model call on a rewrite.
+
+You can watch it work: the chat shows what it's doing as it goes, then collapses to a summary.
+
+```
+✓ Understanding your question
+✓ Recognizing the language      · Hindi, typed in English letters
+✓ Searching your documents      · 8 passages found
+⚠ Didn't find much — trying again · searching your original wording instead
+✓ Searching again               · 6 passages found
+✓ Writing the answer
+```
+
+By default the "was that good enough?" check is free — it uses the search scores already at hand,
+no extra model call — so a normal answer still costs two calls, not five. An LLM-based judge is
+available via `RELEVANCE_GRADER=llm` if you'd rather trade credits for judgement.
+
+**Honest status:** the machinery is built, wired, and unit-tested end to end, but the retry
+threshold (`RELEVANCE_SCORE_THRESHOLD`) is still an untuned default, and there's no published
+measurement yet of how much the retry loop actually helps. See `docs/progress.md`.
 
 ---
 

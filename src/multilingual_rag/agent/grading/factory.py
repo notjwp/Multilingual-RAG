@@ -6,7 +6,7 @@ from multilingual_rag.agent.grading.base import RelevanceGrader
 from multilingual_rag.agent.grading.llm import LlmRelevanceGrader
 from multilingual_rag.agent.grading.score_threshold import ScoreThresholdGrader
 from multilingual_rag.core.config import Settings
-from multilingual_rag.generation.streaming import StreamClient
+from multilingual_rag.generation.base import StreamClient
 
 
 def build_relevance_grader(settings: Settings, *, client: StreamClient) -> RelevanceGrader:

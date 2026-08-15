@@ -2,9 +2,10 @@
 
 Working reference for where this project stands. Updated as work lands.
 
-**Last updated:** 2026-07-25
+**Last updated:** 2026-08-15
 **Current decision:** Fix-in-place (Phases A–D) ✅ complete, then product build-out (M14–M18) ✅
-complete. Rebuild rejected on evidence.
+complete. Rebuild rejected on evidence. **M19 — agentic RAG on LangGraph** ✅ shipped through the
+frontend (phases 0–7 of 9; eval + a live transcript remain).
 **Status:** The roadmap is **functionally complete and hardened**. Phases A, B, C, C4, D all ✅.
 Romanized query-path ✅ — Hindi (default) + opt-in Kannada/Telugu via a **local multi-class MuRIL
 detector** (no per-query network) or the google detector. Product layer ✅ — persisted chat (M14),
@@ -14,6 +15,7 @@ debt — is **fixed** (reload-on-change); the FAISS store added for it was remov
 **No open bugs or known technical debt.**
 **Next candidates (none started, all optional):** MuRIL-for-retrieval; torch-image slimming;
 hybrid BM25 + reranking.
+**In flight:** M19 agentic RAG — see [M19](#m19--agentic-rag-on-langgraph--in-progress) below.
 
 ---
 
@@ -41,6 +43,7 @@ hybrid BM25 + reranking.
 | M17 | Production hardening | ✅ **DONE** — strong-secret validation, `/v1/auth/refresh`, security headers, full-stack Docker Compose (+ frontend image), GitHub Actions CI |
 | M18 | Per-chat documents | ✅ **DONE** — documents scoped to a single chat (`session_id` through schema/vector store/retrieval); live-verified A-cites / B-doesn't; global `/v1/documents` removed |
 | — | Chroma multi-process fix | ✅ **DONE** — reload-on-change (mtime + `clear_system_cache`); two-process regression test; FAISS store removed as redundant |
+| M19 | Agentic RAG on LangGraph | 🟡 **MOSTLY DONE** — phases 0–7 of 9; graph is the only orchestration, steps stream to the UI. Eval (8) + docs close-out (9) outstanding |
 
 ---
 
@@ -373,6 +376,125 @@ your own documents. Every milestone kept the three gates green.
 - ✅ Regression test `tests/integration/test_chroma_multiprocess.py` drives a real second process.
 - ✅ The **FAISS** store (added earlier as a workaround) was **removed** as redundant — embedded
   ChromaDB is the only backend again (`faiss-cpu`/`filelock` deps and the `VECTOR_STORE` setting gone).
+
+---
+
+## M19 — Agentic RAG on LangGraph 🟡 phases 0–7 of 9
+
+Replaced the hand-rolled orchestration with a LangGraph state machine that grades its own retrieval
+and repairs it, and streams its reasoning to the chat UI. **The graph is now the only
+orchestration** — all three routes go through it. Remaining: the eval condition (8) and a live
+verification transcript.
+
+**The real motivation, found during exploration:** condense → retrieve → generate is implemented
+*three times* — `RagQueryService.answer_query` (sync), `RagQueryService.answer` (sync), and
+`StreamingAnswerGenerator.stream` (async) — with a `cast(RagQueryService, …).retrieval_service`
+reach-through in `chat_stream.py` holding two of them together so the 2.2 GB model isn't loaded
+twice. This is a de-duplication that happens to buy agentic behaviour, not agent theatre.
+
+### Phase 0 — dependency spike ✅
+- ✅ `langgraph>=0.6,<0.7` (resolved 0.6.11), pinned by minor: `CompiledStateGraph`'s generic arity
+  changes across majors and strict mypy notices.
+- ✅ Six behaviours **verified before designing against them**, not assumed:
+  `stream_mode="custom"` yields raw chunks (not `(mode, chunk)` tuples) · `get_stream_writer()`
+  no-ops under `ainvoke` but **raises `RuntimeError` off-graph** (so `emit()` needs its guard) ·
+  `py.typed` ships · `add_node` with a partial-`TypedDict` return type-checks clean ·
+  `CompiledStateGraph` takes four type params · **node exceptions propagate through `astream`
+  unwrapped** (the `AppError` → `event: error` contract depends on this).
+- ✅ Outcome better than planned: **zero `# type: ignore`** needed. The plan had budgeted three.
+- ✅ `LANGSMITH_TRACING=false` in `.env.example` + CI — langgraph pulls `langchain-core` →
+  `langsmith` transitively and no telemetry thread should ever start.
+
+### Phase 1 — retrieval routing seam ✅
+- ✅ `retrieval/routing.py` (`LanguageRoute`, `route_query`), `retrieval/base.py` (`Retriever`
+  port), and public `RetrievalService.route()`; `retrieve(..., route=None)` decides for itself.
+- ✅ **All five existing retrieval tests pass byte-for-byte unchanged**, and both eval harnesses
+  are untouched — the point of the `route=None` default. `force_language` /
+  `skip_transliteration` exist solely so `repair` can re-decide.
+
+### Phase 2 — relevance grading port ✅
+- ✅ `RelevanceGrader` protocol + `ScoreThresholdGrader` (free, default, zero LLM calls) and
+  `LlmRelevanceGrader` (opt-in, one call per attempt, **fails open** on an unparseable verdict or
+  any `OpenAIError`).
+- ✅ Documented why this is *not* a contradiction of `detect.py`'s "score-based routing proved
+  unreliable at scale": that was a **relative** judgement between two query forms; this is an
+  **absolute** abstain check. The real limitation (bge-m3 scores aren't calibrated across
+  languages) is recorded rather than hidden.
+- ⚠️ `RELEVANCE_SCORE_THRESHOLD=0.35` is **a guess, not a measurement.** Inert today; needs
+  calibrating against the eval before phase 5 makes it live.
+
+### Phase 3 — events + relocation ✅
+- ✅ `agent/events.py` (`Token`/`Step`/`Done`/`emit`). `StreamClient` → `generation/base.py`,
+  `OpenAICompatibleStreamClient` → `generation/openai_compatible_generator.py`.
+- ✅ Deliberately deletion-free: `StreamingAnswerGenerator` and `test_streaming.py` stay alive
+  through this phase so no green gate has a coverage gap.
+
+### Phase 4 — the graph, wired to nothing ✅
+- ✅ `state.py` · `repair.py` · `nodes.py` · `graph.py` · `factory.py`, plus `NO_CONTEXT_SYSTEM`.
+- ✅ Topology confirmed **from the compiled object**, not from a hand-drawn diagram: two
+  conditional entry edges, a three-way branch out of `grade`, and a real
+  `repair → retrieve → grade → repair` cycle.
+- ✅ 24 new tests. The load-bearing ones: `user_id`/`session_id` reach *every* retrieval including
+  after a repair (the Phase A guarantee, made explicit); routing runs **off the main thread**; a
+  `RateLimitError` surfaces as `AppError(generation_rate_limited, 429)` through `astream`; and the
+  exact ordered step sequence for both happy and repair paths.
+- 🐛 **Caught a latent bug the migration would have shipped silently:** `detect_target_language`
+  calls `asyncio.run` internally (`detect.py:129-137`), safe today only because every caller is
+  already inside `asyncio.to_thread`. An async `route_language` node would raise `RuntimeError`
+  with `TRANSLITERATION_DETECTOR=google` — and because the default `word-list` detector takes no
+  network path, **the entire suite would have stayed green**. Now offloaded, with a test asserting
+  it.
+- 🐛 Fixed an import cycle caused by re-exports in `agent/__init__.py`; every other package here is
+  docstring-only, and matching that convention resolved it.
+- Gates: **185 passed / 15 skipped**, ruff clean, mypy clean over 94 files, zero ignores.
+
+### Phase 5 — the cutover ✅
+- ✅ `api/dependencies.py::get_rag_graph` — one seam for all three routes, and the single place the
+  whole stack is constructed.
+- ✅ **Deleted:** `RagQueryService`, the `QueryService` protocol, `get_query_service`,
+  `generation/streaming.py` (`StreamingAnswerGenerator`), `_get_streaming_answerer` and its
+  `cast(RagQueryService, …).retrieval_service` reach-through, `AnswerGenerator.contextualize` and
+  its implementation. `chat/service.py`'s `QueryAnswerer` + `StreamingAnswerer` collapsed into one
+  `RagAnswerer`; `app.state.query_service` + `streaming_answerer` into one `rag_graph`.
+- ✅ **Kept deliberately:** `OpenAICompatibleAnswerGenerator` / `ChatClient` /
+  `OpenAICompatibleChatClient` — three live non-API consumers (`evaluation/run.py`,
+  `evaluation/llm_judge.py`, and `transliteration/factory.py` for `TRANSLITERATION_PROVIDER=llm`).
+  Deleting them as "duplication" would have broken an opt-in transliteration path no test covers.
+- ✅ No `asyncio.to_thread` left in any route or in `ChatService` — the graph offloads per node.
+- 🐛 **Caught by inspection, not by the suite:** `tests/integration/test_db_layer.py` constructs
+  `ChatService` directly with the old sync `query_service=` kwarg. It is Postgres-gated and skips
+  locally, so it stayed green here and **would have failed CI**. Fixed.
+- ✅ **Closed a coverage gap the cutover exposed:** `ChatService`'s orchestration had no local test
+  (route tests fake the whole service; the only real exercise was that Postgres-gated file). Added
+  `tests/unit/test_chat_service.py` — 7 tests with fake repositories covering turn ordering,
+  history windowing, auto-titling, and step forwarding.
+
+### Phase 6 — step frames over SSE ✅
+- ✅ `event: step` frames carrying `{id, node, status, label, detail}`, as running/done pairs
+  sharing an `id`. Route test asserts the frame order and the shared id.
+
+### Phase 7 — frontend ✅
+- ✅ `AgentStep` type, optional `onStep` in `StreamHandlers`, a `step` branch in `dispatchFrame`.
+- ✅ New `components/chat/agent-steps.tsx` — expanded while streaming, collapsing afterwards to
+  "Thought for N steps · 2 searches · Hindi, typed in English letters". Modelled on `SourcesList`
+  (steps above the answer, sources below); plain `useState`, since there is no Collapsible in
+  `components/ui/`.
+- ✅ `TypingIndicator` now yields once the first step lands — the step list *is* the progress
+  indicator, so bouncing dots beside it were redundant.
+- ✅ `retry()` resets `steps: []`; history rendering leaves `steps` undefined, so a reloaded chat
+  shows none. Gates: `npm run lint` + `npm run build` clean.
+
+### Phases 8–9 — remaining ⬜
+- ⬜ **8 — eval.** A fifth `agentic` condition in `scripts/eval_romanized.py`.
+- ⬜ **9 — docs close-out** once the eval number exists.
+
+**Open risks:**
+- ⚠️ `RELEVANCE_SCORE_THRESHOLD=0.35` is now **live and still uncalibrated**. Too high and every
+  query cycles (cost, latency, a UI full of "trying again"); too low and the grader is inert.
+- ⚠️ The **"not a chain in a costume" test is unmet**: no real transcript yet showing a romanized
+  query retrieve weakly → `repair` pick the raw fallback → the retry clear the floor → a grounded
+  answer. Docker was unavailable locally, so no live end-to-end run has happened. Until that
+  transcript exists, the repair loop is proven only by unit tests.
 
 ---
 
