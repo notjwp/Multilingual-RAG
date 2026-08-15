@@ -174,3 +174,43 @@ def test_google_detector_routes_transliteration_to_detected_language(
     assert embedding_provider.queries == ["ಕನ್ನಡ ಪ್ರಶ್ನೆ"]  # searched the Kannada form
     assert context.transliteration_applied is True
 
+
+def test_retrieve_honours_a_precomputed_route() -> None:
+    # The agent graph decides the route in its own node and passes it down; retrieve must use it
+    # verbatim and not re-run detection (with the google detector that would be a second network
+    # call per query).
+    embedding_provider = FakeEmbeddingProvider()
+    transliterator = FakeTransliterator({"bharat ki rajdhani kya hai": "भारत की राजधानी क्या है"})
+    service = RetrievalService(
+        Settings(),
+        embedding_provider=embedding_provider,
+        vector_store=FakeVectorStore(),
+        transliterator=transliterator,
+    )
+    route = service.route("bharat ki rajdhani kya hai")
+    transliterator.calls.clear()
+
+    context = service.retrieve("bharat ki rajdhani kya hai", user_id="user-1", route=route)
+
+    assert transliterator.calls == []  # decided once, in route() — not again here
+    assert embedding_provider.queries == ["भारत की राजधानी क्या है"]
+    assert context.transliteration_applied is True
+
+
+def test_route_can_skip_transliteration_for_a_romanized_query() -> None:
+    # The repair path's cheapest retry: when the transliterated search is what failed, fall back
+    # to the raw romanized query instead.
+    transliterator = FakeTransliterator({"bharat ki rajdhani kya hai": "भारत की राजधानी क्या है"})
+    service = RetrievalService(
+        Settings(),
+        embedding_provider=FakeEmbeddingProvider(),
+        vector_store=FakeVectorStore(),
+        transliterator=transliterator,
+    )
+
+    route = service.route("bharat ki rajdhani kya hai", skip_transliteration=True)
+
+    assert transliterator.calls == []  # not even consulted
+    assert route.search_text == "bharat ki rajdhani kya hai"
+    assert route.target_language is None
+    assert route.transliteration_applied is False

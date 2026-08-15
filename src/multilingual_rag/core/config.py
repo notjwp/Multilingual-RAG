@@ -99,6 +99,15 @@ class Settings(BaseSettings):
     chunk_overlap_tokens: int = Field(default=120, ge=0)
     retrieval_top_k: int = Field(default=8, gt=0)
 
+    # Agentic retrieval loop: how a weak retrieval is detected, and how many repairs it may try.
+    # score-threshold is free (top cosine score, no LLM call) and is the default so the common
+    # case stays at two provider calls per turn; llm adds one call per retrieval attempt.
+    # The 0.35 floor is a conservative starting point, not a measured optimum — bge-m3 cosine
+    # scores are not calibrated across languages. See agent/grading/score_threshold.py.
+    relevance_grader: Literal["score-threshold", "llm"] = "score-threshold"
+    relevance_score_threshold: float = Field(default=0.35, ge=0.0, le=1.0)
+    agent_max_repairs: int = Field(default=1, ge=0)
+
     # Multi-turn chat: how many prior messages to feed the answer model (and the query-rewrite
     # step) as conversation history. ~5 exchanges. 0 disables history (single-shot per turn).
     chat_history_max_messages: int = Field(default=10, ge=0)

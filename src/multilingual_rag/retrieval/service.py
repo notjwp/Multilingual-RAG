@@ -6,8 +6,8 @@ from multilingual_rag.core.config import Settings
 from multilingual_rag.core.models import RetrievalContext
 from multilingual_rag.embeddings.base import EmbeddingProvider
 from multilingual_rag.ingestion.language import LanguageDetector
+from multilingual_rag.retrieval.routing import LanguageRoute, route_query
 from multilingual_rag.transliteration.base import Transliterator
-from multilingual_rag.transliteration.detect import detect_target_language
 from multilingual_rag.vectorstores.base import VectorFilter, VectorStore
 
 
@@ -29,6 +29,26 @@ class RetrievalService:
         self.language_detector = language_detector or LanguageDetector()
         self.transliterator = transliterator
 
+    def route(
+        self,
+        query: str,
+        *,
+        force_language: str | None = None,
+        skip_transliteration: bool = False,
+    ) -> LanguageRoute:
+        """Decide which text to embed for ``query`` (the transliteration decision).
+
+        Public so the agent graph can make this decision as an explicit step, and re-make it
+        differently on a weak retrieval. ``retrieve`` calls it for callers that don't.
+        """
+        return route_query(
+            query.strip(),
+            settings=self.settings,
+            transliterator=self.transliterator,
+            force_language=force_language,
+            skip_transliteration=skip_transliteration,
+        )
+
     def retrieve(
         self,
         query: str,
@@ -37,23 +57,26 @@ class RetrievalService:
         session_id: str | None = None,
         top_k: int | None = None,
         filters: VectorFilter | None = None,
+        route: LanguageRoute | None = None,
     ) -> RetrievalContext:
         """Retrieve context chunks for a query, scoped to one user (and chat, when given).
 
-        When the query is detected as **romanized Hindi** (`is_romanized_indic`) and
-        transliteration is enabled, the query is transliterated to native Devanagari and *that*
-        form is embedded and searched — so it matches the native-script index instead of
-        collapsing to noise. A plain English query has no Hindi markers, so it is searched as-is
-        and stays same-language. Detection (a linguistic check) is used rather than routing by
-        retrieval score, which proved unreliable at scale.
+        When the query is detected as **romanized Indic** and transliteration is enabled, the
+        query is transliterated to its native script and *that* form is embedded and searched —
+        so it matches the native-script index instead of collapsing to noise. A plain English
+        query has no such markers, so it is searched as-is and stays same-language. Detection (a
+        linguistic check) is used rather than routing by retrieval score, which proved unreliable
+        at scale.
+
+        Pass ``route`` to reuse a decision already made (the agent graph does this, so a repaired
+        retry can override the script choice without re-detecting).
         """
         normalized_query = query.strip()
+        decided = route if route is not None else self.route(normalized_query)
         query_language = self.language_detector.detect(normalized_query)
         limit = top_k or self.settings.retrieval_top_k
 
-        transliterated_query = self._transliterate(normalized_query)
-        search_text = transliterated_query if transliterated_query is not None else normalized_query
-        embedding = self.embedding_provider.embed_query(search_text)
+        embedding = self.embedding_provider.embed_query(decided.search_text)
         results = self.vector_store.search(
             embedding, user_id=user_id, session_id=session_id, top_k=limit, filters=filters
         )
@@ -62,27 +85,6 @@ class RetrievalService:
             query=normalized_query,
             query_language=query_language,
             results=results,
-            transliterated_query=transliterated_query,
-            transliteration_applied=transliterated_query is not None,
+            transliterated_query=decided.transliterated_query,
+            transliteration_applied=decided.transliteration_applied,
         )
-
-    def _transliterate(self, query: str) -> str | None:
-        """Return the native-script transliteration to search with, or None to leave the query.
-
-        Detects *which* configured Indic language the query is romanized in and transliterates to
-        that script (Hindi with the default detector; hi/kn/te with the ``google`` detector).
-        Skips when nothing is detected or the transliterator returns the input unchanged (a no-op).
-        """
-        if self.transliterator is None:
-            return None
-        target = detect_target_language(
-            query,
-            self.settings.transliteration_languages,
-            detector=self.settings.transliteration_detector,
-        )
-        if target is None:
-            return None
-        transliterated = self.transliterator.transliterate(query, target_language=target)
-        if not transliterated.strip() or transliterated.strip() == query.strip():
-            return None
-        return transliterated

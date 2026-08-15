@@ -30,6 +30,9 @@ dependencies = [
   # Optional MuRIL-based romanized-Hindi detector (TRANSLITERATION_DETECTOR=muril): the LR head
   # is scikit-learn; MuRIL itself comes via transformers (already present).
   "joblib>=1.4",
+  # Agentic RAG orchestration. Pinned to a minor range: LangGraph changes CompiledStateGraph's
+  # generic arity across majors, which strict mypy notices.
+  "langgraph>=0.6,<0.7",
   "langdetect>=1.0.9",
   "scikit-learn>=1.5",
   "openai>=1.59.7",
