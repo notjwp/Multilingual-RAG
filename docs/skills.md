@@ -99,6 +99,14 @@ of getting that wrong (`docs/architecture.md §3.1`).
   pipeline by a wide margin (0.669 → 0.917).
 - **Disclose residual bias in the output, not the commit message.** `romanize()` still falls back
   to the rule-based scheme for ~14% of words, and every run prints that share.
+- **A one-sided acceptance bar can adopt a broken component.** `LlmRelevanceGrader` fails open, so
+  a judge model that 404s or times out grades everything relevant and posts a *perfect* 0%
+  false-alarm rate. `scripts/eval_grader.py` therefore requires false alarms <20% **and** catches
+  ≥50%. Whenever a component has a fail-safe direction, the metric must be able to see it.
+- **LLM-as-judge is not free capability.** Measured on this project's endpoint: llama-3.1-8b
+  false-alarms on 81% of *correct* retrievals, the 70B on 75% — 9× the parameters for 6 points.
+  Test a judge before designing around one, and probe the model id first: `models.list()`
+  advertises far more than a free-tier key can actually reach.
 - **The habit:** before optimizing against a number, ask what would have to be true for it to be
   wrong — and check that first. Roughly a day of this project's churn traces to skipping it.
 

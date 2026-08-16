@@ -1,0 +1,49 @@
+{
+  "config": {
+    "agent_max_repairs": 1,
+    "corpus_dir": "data\\eval\\xquad",
+    "distractor_cap": null,
+    "documents": 20240,
+    "k": 5,
+    "lang": "hi",
+    "queries": 150,
+    "relevance_grader": "score-threshold",
+    "relevance_score_threshold": 0.0,
+    "transliteration_detector": "word-list",
+    "transliteration_provider": "google"
+  },
+  "detection_rate": 0.98,
+  "metrics": {
+    "agentic": {
+      "mrr": 0.6987777777777778,
+      "recall_at_5": 0.7666666666666667,
+      "retention": 0.8518518518518519
+    },
+    "native": {
+      "mrr": 0.8252222222222222,
+      "recall_at_5": 0.9,
+      "retention": 1.0
+    },
+    "romanized-raw": {
+      "mrr": 0.2028888888888889,
+      "recall_at_5": 0.29333333333333333,
+      "retention": 0.3259259259259259
+    },
+    "shipped": {
+      "mrr": 0.6987777777777778,
+      "recall_at_5": 0.7666666666666667,
+      "retention": 0.8518518518518519
+    },
+    "transliterated": {
+      "mrr": 0.7021111111111111,
+      "recall_at_5": 0.7666666666666667,
+      "retention": 0.8518518518518519
+    }
+  },
+  "repair_rate": 0.0,
+  "romanization": {
+    "fallback_words": 157,
+    "human_share": 0.903680981595092,
+    "human_words": 1473
+  }
+}

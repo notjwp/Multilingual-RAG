@@ -230,12 +230,14 @@ essentially never appear in English.
 
 **0.20 → 0.67 = 3.3×**; shipped ≈ the transliteration ceiling because detection recall is **98.7%**.
 
-> ⚠️ **These numbers are superseded.** They were measured when the harness generated its romanized
-> test queries with `indic_transliteration.sanscript` — the same library as the `rule-based`
-> adapter under test (§3). On human-written romanized queries the same shipped path scores **0.917
-> retention** (sampled: 60 queries / 3240 docs). The mechanism and the conclusion hold; the
-> magnitudes were pessimistic because the queries were unlike real input. Re-derive on the full
-> corpus before quoting a replacement.
+> ⚠️ **Superseded — the real figure is 0.852.** These were measured when the harness generated its
+> romanized test queries with `indic_transliteration.sanscript`, the same library as the
+> `rule-based` adapter under test (§3.1). Re-measured on human-written queries over the **full
+> corpus — 150 queries / 20,240 documents / google / word-list**, the shipped path scores
+> **recall@5 0.767, retention 0.852** (`data/eval/reports/hi-full-baseline.json`). The mechanism
+> and the conclusion hold; the magnitudes were pessimistic because the queries were unlike real
+> input. A 3,240-document sample scored 0.917 — sampling inflates retention, which is why the
+> acceptance gate refuses to score anything but a full run.
 
 **Precision is prioritized** — a false positive would mis-transliterate a real English query, which
 is worse than missing a Hindi one. The marker list deliberately excludes English collisions (`the`,
@@ -336,7 +338,7 @@ a structural property of the graph rather than a branch inside a node.
 **`repair` is the project-specific part.** Generic corrective RAG asks "rewrite the query?"; this
 asked **"was my script routing wrong?"** first. **Measurement said that instinct was wrong**, and
 the ordering now reflects that: script routing is almost always *correct* (detection 98.3%,
-transliteration lifts recall 0.500 → 0.917), so a failed romanized query was usually rendered
+transliteration lifts retention 0.326 → 0.852), so a failed romanized query was usually rendered
 imperfectly, not misidentified. Leading with the raw-form retreat scored **0.767 against 0.800 for
 no agent at all**. `agent/repair.py::choose_repair` is a pure function picking:
 
@@ -377,6 +379,27 @@ retreat, not a conservative guess.** The reasoning is worth reading before raisi
 bet and it can lose, so `grade` only promotes an attempt that flips weak→relevant. Deliberately
 *not* "higher score wins" — that is the cross-script comparison above, and it measurably failed.
 
+**No reachable LLM judge is good enough either.** `scripts/eval_grader.py` measures a candidate on
+two rates — false alarms (correct retrievals graded weak) and catches (real misses graded weak) —
+over 20 XQuAD-hi queries. Bar: **false alarms <20% AND catches ≥50%**. Measured on this NIM key:
+
+| judge | false alarms | catches | verdict |
+|---|---|---|---|
+| `meta/llama-3.1-8b-instruct` | 81% | 100% | too noisy |
+| `meta/llama-3.1-70b-instruct` | 75% | 100% | too noisy |
+| `meta/llama-3.3-70b-instruct` | — | — | unreachable (241s → timeout) |
+| gemma / mistral / nemotron / qwen | — | — | 404 — listed by `models.list()`, not on this key |
+
+Nine times the parameters bought six points; both reachable models reject ~80% of *correct*
+retrievals. That is what justifies `score-threshold` as the default, and it is why the loop is
+near-inert rather than merely conservative.
+
+**The catch rate is not optional.** `LlmRelevanceGrader` fails open, so a model that 404s or times
+out grades everything relevant and posts a flawless **0%** false-alarm rate. A one-sided bar would
+have adopted it and silently killed the loop — that happened during this evaluation and the
+two-sided bar caught it. Always probe a model id before running against it; `models.list()`
+advertises far more than a free-tier key can reach.
+
 **Streaming.** Nodes emit `Token` / `Step` / `Done` onto LangGraph's single `custom` channel via
 `agent/events.py::emit`. Not `stream_mode="messages"` — that taps LangChain's callback manager for
 `BaseChatModel` output, and generation here is the raw `openai` SDK. `emit` no-ops under `ainvoke`
@@ -407,17 +430,25 @@ summary.
 (default `0.0`, see above), `AGENT_MAX_REPAIRS` (default `1`).
 
 **What this measures out at.** `scripts/eval_romanized.py` scores a fifth `agentic` condition by
-driving the real graph (generation stubbed, so the eval stays free). XQuAD-hi, 3240 docs, 60
-queries, human-written romanized queries, k=5:
+driving the real graph (generation stubbed, so the eval stays free). **Full corpus: XQuAD-hi,
+20,240 documents, 150 queries, google, human-written romanized queries, k=5** —
+`data/eval/reports/hi-full-baseline.json`:
 
-| native | romanized-raw | transliterated | shipped | **agentic** |
-|---|---|---|---|---|
-| 1.000 | 0.500 | 0.917 | 0.917 | **0.917** |
+| condition | recall@5 | MRR | retention |
+|---|---|---|---|
+| native | 0.900 | 0.825 | 1.000 |
+| romanized-raw | 0.293 | 0.203 | 0.326 |
+| transliterated | 0.767 | 0.702 | 0.852 |
+| shipped | 0.767 | 0.699 | 0.852 |
+| **agentic** | **0.767** | 0.699 | **0.852** |
 
-**Parity**, with the repair loop firing 0/60. That is the honest result: the cycle is real and
+**Parity**, with the repair loop firing 0/150. That is the honest result: the cycle is real and
 provably safe, and nothing on this corpus rewards it. Five configurations were measured before
-settling here — 0.733, 0.750, 0.767 (all *below* the plain pipeline), then parity twice. A win
-would need a stronger judge model than llama-3.1-8b, or `relanguage` with kn/te enabled.
+settling here — 0.733, 0.750, 0.767 retention (all *below* the plain pipeline), then parity twice.
+Note `native` is 0.900, not 1.000: with 20,000 distractors even the native-script ceiling drops,
+which is why **retention** (recall ÷ native) is the comparable metric and raw recall is not.
+
+A win would need a better judge, and there isn't one on this endpoint — see below.
 
 What the agent does buy, independent of retrieval quality: one orchestration instead of three,
 tenancy that cannot be prompt-injected, visible reasoning, a guarantee it can never return worse
@@ -746,13 +777,17 @@ so it is covered by tests and `mypy --strict`.
 
 **Consequences for numbers already published:**
 
-- Shipped romanized retention is **much better** than recorded: 0.917 sampled, against 0.669. The
-  old figure was depressed by measuring against text nobody types.
-- The **0.747 acceptance bar is incomparable** and the script no longer prints PASS/FAIL against it.
-- The **kn/te figures carry the same bias** and cannot be re-derived — no kn/te human lexicon
-  exists yet.
-- All replacements so far are **sampled** (60 queries / 3240 docs). Re-derive on the full 150 /
-  20,240 before treating any of them as a baseline.
+- Shipped romanized retention is **much better** than recorded: **0.852** on the full corpus,
+  against 0.669. The old figure was depressed by measuring against text nobody types.
+- The 0.747 acceptance bar was incomparable and has been **replaced by 0.80**, derived from the
+  full-corpus 0.852 with ~0.05 of headroom. The script gates **only full-corpus runs** — sampling
+  fewer distractors inflates retention (3,240 docs scored 0.917 where 20,240 scored 0.852), so a
+  sampled run prints "no gate" rather than a flattering PASS.
+- **kn/te lexicons now exist but do not fix those numbers.** Dakshina covers all twelve languages,
+  so `--langs kn te` builds them — but coverage of the Wikipedia-sentence vocabulary is only
+  **42.6% / 43.6%** against a 50% bar (hi reaches 90.4%). The majority of each kn/te query is still
+  sanscript output, so `kn 0.963 / te 0.975` **stay marked directional**. The builder prints this
+  verdict itself rather than leaving it to judgement.
 
 `evaluation/harness.py` is still orchestration-blind. Teaching `run_live_evaluation` to accept a
 `Retriever` remains the way to close that.
@@ -905,6 +940,16 @@ tests/                  unit/ · integration/ (no conftest.py)
 - **Windows path length breaks the Chroma tests.** If pytest's temp dir is deep, the SQLite path
   passes 260 chars and every `test_chroma_store.py` case fails with an opaque
   `InternalError: SQL logic error`. Use a short `TMPDIR` (e.g. `C:\tmp\rt`).
+- **`langdetect` gets romanized Indic badly wrong** — it labels `bharat ki rajdhani kya hai` as
+  Swahili. `resolve_answer_language` used to trust that over the router, which had already
+  identified Hindi correctly. The normal path hides it (with Devanagari passages in the prompt the
+  model mirrors them and ignores the bad hint), so it only surfaced when retrieval returned
+  nothing and a refusal came back in *Albanian*. `RagNodes._response_language` now prefers
+  `route.target_language`. Anything else reading `RetrievalContext.query_language` for a
+  Latin-script query inherits the same trap.
+- **A killed tool call does not kill the process it started.** A timed-out eval sat on the GPU for
+  13 minutes afterwards and starved the next run into a CUDA OOM. Check `tasklist`/`nvidia-smi`
+  before blaming the code.
 - **`/v1/query` is not chat-scoped** the way the chat path is — it searches all of a user's chunks.
   Two retrieval paths with different scoping semantics.
 - **`delete_chat_document`** passes `session_id` to the vector store, but `DocumentRepository.delete`

@@ -1,0 +1,16 @@
+{
+  "catch_bar": 0.5,
+  "catch_rate": 0.0,
+  "catches": 0,
+  "documents": 3240,
+  "false_alarm_bar": 0.2,
+  "false_alarm_rate": 0.0,
+  "false_alarms": 0,
+  "graded_weak": 0,
+  "hits": 16,
+  "lang": "hi",
+  "model": "qwen/qwen2.5-7b-instruct",
+  "note": "INVALID AS A JUDGE MEASUREMENT: this model id 404s on this NIM key (it is listed by models.list() but not reachable). All 20 calls errored and LlmRelevanceGrader fails open, so every retrieval was graded relevant -- hence 0 false alarms AND 0 catches. Kept as the record of why the acceptance bar must be two-sided; it says nothing about qwen2.5-7b quality.",
+  "queries": 20,
+  "verdict": "INVALID - model unreachable (404)"
+}

@@ -16,6 +16,7 @@ test that routing runs off the main thread.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from typing import Literal
 
 from fastapi import status
@@ -34,7 +35,11 @@ from multilingual_rag.agent.repair import (
 from multilingual_rag.agent.state import AgentState, AgentUpdate
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
-from multilingual_rag.core.models import GeneratedAnswer, RetrievalContext
+from multilingual_rag.core.models import (
+    GeneratedAnswer,
+    RetrievalContext,
+    VectorSearchResult,
+)
 from multilingual_rag.generation.base import StreamClient
 from multilingual_rag.generation.citations import answer_citations
 from multilingual_rag.generation.contextualize import (
@@ -286,9 +291,7 @@ class RagNodes:
         if context.query != state["question"]:
             # Retrieval used the condensed/repaired query; answer the user's actual wording.
             context = context.model_copy(update={"query": state["question"]})
-        response_language = resolve_answer_language(
-            state["preferred_language"], context.query_language, context.results
-        )
+        response_language = self._response_language(state, context, context.results)
         prompt = build_answer_prompt(context, response_language=response_language)
         answer_text = await self._stream_answer(
             system=SYSTEM_INSTRUCTIONS, prompt=prompt, state=state
@@ -304,9 +307,7 @@ class RagNodes:
     async def generate_no_context(self, state: AgentState) -> AgentUpdate:
         """Say plainly that the documents don't cover it, with guaranteed-empty citations."""
         context = self._require_context(state)
-        response_language = resolve_answer_language(
-            state["preferred_language"], context.query_language, ()
-        )
+        response_language = self._response_language(state, context, ())
         prompt = build_no_context_prompt(state["question"], response_language=response_language)
         answer_text = await self._stream_answer(
             system=NO_CONTEXT_SYSTEM, prompt=prompt, state=state
@@ -316,6 +317,27 @@ class RagNodes:
         return {"answer": answer, "context": context}
 
     # ── shared generation plumbing ──────────────────────────────────────────
+
+    @staticmethod
+    def _response_language(
+        state: AgentState, context: RetrievalContext, results: Sequence[VectorSearchResult]
+    ) -> str:
+        """Pick the answer language, trusting the router over langdetect.
+
+        ``langdetect`` guesses from Latin script and gets romanized Indic badly wrong — it labels
+        ``bharat ki rajdhani kya hai`` as Swahili. ``route_language`` has already identified the
+        real language with the purpose-built detector (~98% accurate), so its verdict wins.
+
+        This surfaced live: a no-context refusal for a romanized Hindi query came back in
+        *Albanian*. The normal path masks the same bug — with Devanagari passages in the prompt the
+        model mirrors them and ignores the bad hint — so it only became visible once retrieval
+        returned nothing. Fixed for both paths, since the hint was wrong in both.
+        """
+        route = state["route"]
+        detected = route.target_language if route is not None else None
+        return resolve_answer_language(
+            state["preferred_language"], detected or context.query_language, results
+        )
 
     async def _stream_answer(self, *, system: str, prompt: str, state: AgentState) -> str:
         """Stream the model's reply, emitting tokens as they arrive, and return the whole text.

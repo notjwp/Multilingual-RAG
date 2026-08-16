@@ -350,13 +350,15 @@ rather trade credits for real judgement.
 
 ### What it measures out at — and why that's a "no change"
 
-| | recall@5 |
+Measured on the full corpus — 150 questions against 20,240 documents:
+
+| | retention vs native |
 |---|---|
 | Devanagari question (the ceiling) | 1.000 |
-| Typed in English letters, searched as-is | 0.500 |
-| Converted to Devanagari first | 0.917 |
-| **Without the agent** | **0.917** |
-| **With the agent** | **0.917** |
+| Typed in English letters, searched as-is | 0.326 |
+| Converted to Devanagari first | 0.852 |
+| **Without the agent** | **0.852** |
+| **With the agent** | **0.852** |
 
 Parity. The agent doesn't improve retrieval here, and the reason is worth stating plainly: the
 check can't reliably tell *"this search failed"* from *"this search worked but scored low."* Those
@@ -379,15 +381,18 @@ also produced text nobody types: `josa narmana` where a person writes `josh norm
 
 Queries now come from **human-written** romanizations (Google's Dakshina dataset plus a parallel
 corpus). Fixing it revealed the multilingual path was substantially better than this README had
-been claiming — romanized retention went from a reported 0.669 to **0.917** — and simultaneously
+been claiming — romanized retention went from a reported 0.669 to **0.852** — and simultaneously
 invalidated the justification for a feature that had just been built, which was then removed.
 
-⚠️ These are **sampled** figures (60 queries against 3,240 documents), not the full-corpus
-baseline. Reproduce with:
+Reproduce it (~40 minutes; the full corpus, no shortcuts):
 
 ```powershell
-python scripts/eval_romanized.py --sample 60 --distractor-cap 3000
+python scripts/eval_romanized.py --sample 150 --report data/eval/reports/hi-full-baseline.json
 ```
+
+A smaller `--distractor-cap` runs faster but **inflates the score** — 3,240 documents reads 0.917
+where the full 20,240 reads 0.852 — so the acceptance gate deliberately refuses to grade a
+shortened run.
 
 ---
 

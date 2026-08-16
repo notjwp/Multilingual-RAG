@@ -296,6 +296,40 @@ def test_a_repair_that_retrieves_better_is_adopted() -> None:
     assert result.context.results[0].chunk_id == "strong:0"
 
 
+def test_the_answer_language_follows_the_router_not_langdetect() -> None:
+    """Found by a live transcript: a no-context refusal for `bharat ki rajdhani kya hai` came back
+    in Albanian, because langdetect labels that romanized Hindi as Swahili and
+    resolve_answer_language trusted it. route_language had already identified `hi` correctly with
+    the purpose-built detector. The normal path masks this — Devanagari passages in the prompt make
+    the model mirror them regardless — so only the empty-retrieval path exposed it."""
+    misdetected = RetrievalContext(query="bharat ki rajdhani kya hai", query_language="sw",
+                                   results=())
+    graph = _graph(
+        retriever=FakeRetriever([misdetected]),  # FakeRetriever routes to hi
+        grader=FakeGrader(False),
+        settings=Settings(environment="test", agent_max_repairs=0),
+    )
+
+    result = asyncio.run(graph.answer("bharat ki rajdhani kya hai", user_id="user-1"))
+
+    assert result.answer.language == "hi", "the router's verdict must beat langdetect's guess"
+
+
+def test_an_explicit_preferred_language_still_wins() -> None:
+    misdetected = RetrievalContext(query="q", query_language="sw", results=())
+    graph = _graph(
+        retriever=FakeRetriever([misdetected]),
+        grader=FakeGrader(False),
+        settings=Settings(environment="test", agent_max_repairs=0),
+    )
+
+    result = asyncio.run(
+        graph.answer("q", user_id="user-1", preferred_language="fr")
+    )
+
+    assert result.answer.language == "fr"
+
+
 def test_max_repairs_zero_disables_the_cycle_entirely() -> None:
     retriever = FakeRetriever([_context(results=())])
     graph = _graph(

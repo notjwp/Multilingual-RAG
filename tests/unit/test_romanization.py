@@ -34,9 +34,19 @@ def test_the_committed_hindi_lexicon_loads() -> None:
 
 
 def test_a_language_without_a_lexicon_degrades_instead_of_failing() -> None:
-    # Only hi ships one. kn/te must still romanize, via the rule-based fallback.
-    assert human_lexicon("kn") == {}
+    # hi/kn/te ship lexicons; anything else must still romanize via the rule-based fallback
+    # rather than raising.
+    assert human_lexicon("ml") == {}
     assert romanize("ಕನ್ನಡ", "kn")  # non-empty, no exception
+
+
+@pytest.mark.parametrize("lang", ["hi", "kn", "te"])
+def test_every_evaluated_language_ships_a_human_lexicon(lang: str) -> None:
+    # kn/te cover only ~43% of their (Wikipedia-sentence) query vocabulary against hi's 86%, so
+    # their eval numbers stay marked directional — but a partial lexicon still beats none, and
+    # the eval discloses the fallback share every run.
+    hint = f"run scripts/build_romanization_lexicon.py --langs {lang}"
+    assert len(human_lexicon(lang)) > 100, hint
 
 
 def test_english_loanwords_are_spelled_in_english_not_phonetically() -> None:
@@ -56,6 +66,18 @@ def test_covered_words_do_not_reproduce_the_rule_based_scheme() -> None:
     differing = [w for w in (BALL, IN, TEAM) if romanize(w) != rule_romanize(w)]
 
     assert differing == [BALL, IN, TEAM]
+
+
+@pytest.mark.parametrize("lang", ["hi", "kn", "te"])
+def test_the_lexicon_meaningfully_diverges_from_the_rule_based_scheme(lang: str) -> None:
+    """Generalizes the bias check across languages: a lexicon whose entries merely reproduce
+    rule_romanize would leave the eval rigged even while looking fixed. Sample the lexicon and
+    require most entries to differ."""
+    lexicon = human_lexicon(lang)
+    sample = sorted(lexicon)[:400]
+    differing = sum(1 for word in sample if lexicon[word] != rule_romanize(word, lang))
+
+    assert differing / len(sample) > 0.5, f"{lang}: lexicon mostly echoes the rule-based scheme"
 
 
 def test_unknown_words_fall_back_to_the_rule_based_romanizer() -> None:
