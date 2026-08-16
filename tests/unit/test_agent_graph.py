@@ -17,6 +17,7 @@ from openai import RateLimitError
 from multilingual_rag.agent.events import AgentEvent, Done, Step, Token
 from multilingual_rag.agent.factory import build_rag_graph
 from multilingual_rag.agent.grading.base import Grade
+from multilingual_rag.agent.grounding.factory import build_grounding_judge
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
 from multilingual_rag.core.models import (
@@ -24,6 +25,8 @@ from multilingual_rag.core.models import (
     RetrievalContext,
     VectorSearchResult,
 )
+from multilingual_rag.evaluation.llm_judge import LlmFaithfulnessJudge
+from multilingual_rag.generation.prompts import NO_CONTEXT_SYSTEM
 from multilingual_rag.retrieval.routing import LanguageRoute
 from multilingual_rag.vectorstores.base import VectorFilter
 
@@ -469,3 +472,151 @@ def test_answer_preserves_the_users_wording_after_a_condense() -> None:
 
     assert retriever.queries == ["Who founded the Zorblax Protocol?"]  # searched the rewrite
     assert result.context.query == "who founded it?"  # reported the user's actual words
+
+
+# --- the grounding gate ------------------------------------------------------------------------
+
+
+class FakeGroundingJudge:
+    """Scripted grounding verdicts; records exactly what it was asked to judge."""
+
+    def __init__(self, supported: bool = True, *, error: Exception | None = None) -> None:
+        self._supported = supported
+        self._error = error
+        self.calls: list[tuple[str, str]] = []  # (answer, context) per judgement
+
+    def is_supported(self, *, answer: str, context: str) -> bool:
+        self.calls.append((answer, context))
+        if self._error is not None:
+            raise self._error
+        return self._supported
+
+
+class TwoAnswerClient(FakeStreamClient):
+    """Answers the grounded prompt and the refusal prompt differently.
+
+    Discriminates on the real ``NO_CONTEXT_SYSTEM`` constant, so a test that expects a refusal
+    cannot pass by accident just because both paths emit the same scripted text.
+    """
+
+    def __init__(self, grounded: str, refusal: str = "Your documents don't cover that.") -> None:
+        super().__init__([grounded])
+        self._refusal = refusal
+
+    async def astream_completion(
+        self, *, model: str, system: str, prompt: str, history: Sequence[ConversationTurn] = ()
+    ) -> AsyncIterator[str]:
+        self.systems.append(system)
+        self.stream_prompts.append(prompt)
+        yield self._refusal if system == NO_CONTEXT_SYSTEM else self._deltas[0]
+
+
+def _gated(
+    judge: FakeGroundingJudge,
+    *,
+    client: FakeStreamClient | None = None,
+    retriever: FakeRetriever | None = None,
+):
+    return build_rag_graph(
+        Settings(environment="test", grounding_gate=True),
+        retriever=retriever or FakeRetriever(),
+        client=client or TwoAnswerClient("Bharat ka rajdhaan Dilli hai. [1]"),
+        grader=FakeGrader(True),
+        judge=judge,
+    )
+
+
+def test_the_grounding_gate_replaces_an_unsupported_answer_with_a_refusal() -> None:
+    # The manual-testing defect, reproduced: a health document is retrieved, graded relevant
+    # (0.425 cosine clears a 0.0 floor), and the model answers "Dilli" from parametric knowledge
+    # with [1] pointing at the health passage. A fabricated citation looks like evidence, which
+    # is worse than a plainly wrong answer. Measured hallucination rate on unanswerable
+    # questions: 61% (scripts/eval_refusal.py).
+    judge = FakeGroundingJudge(supported=False)
+    graph = _gated(judge)
+
+    result = asyncio.run(graph.answer("bharat ka rajdhaan kya hai", user_id="user-1"))
+
+    assert result.answer.answer == "Your documents don't cover that."
+    assert result.answer.citations == ()
+
+
+def test_the_grounding_gate_never_streams_the_text_of_an_unsupported_answer() -> None:
+    # You cannot un-send a hallucination. A gate that fires only *after* the draft has streamed
+    # token-by-token is decorative: the user has already read "Dilli", and the refusal replacing
+    # it arrives too late to matter. So gated generation buffers — the whole reason the gate
+    # costs latency and not just a provider call.
+    graph = _gated(FakeGroundingJudge(supported=False))
+
+    events = asyncio.run(_collect(graph.stream("bharat ka rajdhaan kya hai", user_id="user-1")))
+
+    streamed = "".join(e.text for e in events if isinstance(e, Token))
+    assert "Dilli" not in streamed
+    assert streamed == "Your documents don't cover that."
+
+
+def test_the_grounding_gate_delivers_a_supported_answer_with_its_citations() -> None:
+    # The other half: buffering must not swallow the answers that pass. A gate that refuses
+    # everything would score 0% hallucination and be useless.
+    graph = _gated(FakeGroundingJudge(supported=True), client=TwoAnswerClient("Bharat is [1]."))
+
+    events = asyncio.run(_collect(graph.stream("what is bharat", user_id="user-1")))
+
+    done = [e for e in events if isinstance(e, Done)]
+    assert "".join(e.text for e in events if isinstance(e, Token)) == "Bharat is [1]."
+    assert len(done) == 1  # exactly one terminal event, whichever branch ran
+    assert done[0].answer.citations[0].chunk_id == "doc-1:0"
+
+
+def test_the_grounding_gate_fails_open_when_the_judge_itself_errors() -> None:
+    # Fails open, like LlmRelevanceGrader. A rate limit or a 502 on the safety check is not
+    # evidence the answer was wrong, and failing closed would convert a provider blip into every
+    # answer in the product becoming "your documents don't cover this".
+    judge = FakeGroundingJudge(
+        error=AppError("judge down", code="faithfulness_judge_error", status_code=502)
+    )
+    graph = _gated(judge, client=TwoAnswerClient("Bharat is [1]."))
+
+    result = asyncio.run(graph.answer("what is bharat", user_id="user-1"))
+
+    assert result.answer.answer == "Bharat is [1]."
+    assert result.answer.citations[0].chunk_id == "doc-1:0"
+
+
+def test_the_longest_gated_path_stays_inside_the_recursion_limit() -> None:
+    # The worst case got one super-step longer when ground_check was added: entry, condense,
+    # route, retrieve, grade, repair, retrieve, grade, generate, ground_check,
+    # generate_no_context. If the slack no longer covers it, the graph raises
+    # agent_recursion_limit *instead of answering* — and only on the rare gated-repair-rejected
+    # path, so nothing else in this suite would notice.
+    graph = build_rag_graph(
+        Settings(environment="test", grounding_gate=True, agent_max_repairs=1),
+        retriever=FakeRetriever([_context(results=()), _context()]),
+        client=TwoAnswerClient("Bharat ka rajdhaan Dilli hai. [1]"),
+        grader=FakeGrader(False, True),  # one repair, then relevant
+        judge=FakeGroundingJudge(supported=False),  # ...and then rejected
+    )
+
+    result = asyncio.run(
+        graph.answer(
+            "bharat ka rajdhaan kya hai",
+            user_id="user-1",
+            history=(ConversationTurn(role="user", content="earlier turn"),),  # forces condense
+        )
+    )
+
+    assert result.answer.answer == "Your documents don't cover that."
+
+
+def test_no_grounding_judge_is_built_by_default() -> None:
+    # None, not a judge that always approves: the disabled gate must cost zero provider calls,
+    # so ground_check short-circuits on the None rather than paying to be told yes.
+    assert build_grounding_judge(Settings(environment="test")) is None
+
+
+def test_the_grounding_gate_builds_the_faithfulness_judge_when_enabled() -> None:
+    judge = build_grounding_judge(
+        Settings(environment="test", grounding_gate=True, generation_api_key="k")
+    )
+
+    assert isinstance(judge, LlmFaithfulnessJudge)

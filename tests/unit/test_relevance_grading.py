@@ -134,26 +134,35 @@ def test_llm_grader_skips_the_call_entirely_when_nothing_was_retrieved() -> None
 # --- factory -----------------------------------------------------------------------------------
 
 
-def test_factory_defaults_to_the_free_score_threshold_grader_at_a_zero_floor() -> None:
-    """Both halves of this default are measured, not cautious. The llm grader false-alarms on 81%
-    of correct retrievals with llama-3.1-8b, and every positive cosine floor tried scored below
-    having no agent at all (best 0.767 vs 0.800) because the score bands overlap. A 0.0 floor
-    means only a *literally empty* retrieval is graded weak — the one signal cosine can be
-    trusted on — so the repair loop cannot fire on a hunch."""
+def test_factory_defaults_to_the_llm_grader() -> None:
+    """The default is chosen on refusal quality, not on retrieval metrics.
+
+    ``score-threshold`` scores better on XQuAD and costs a third as many provider calls, and it
+    was the default until the refusal eval existed. But XQuAD has no unanswerable questions, so
+    it could not see that the cheap grader lets the model fabricate an answer — with a citation
+    attached to an unrelated passage — 61% of the time it is asked something out of corpus. The
+    llm grader takes that to 0%. It pays for it by refusing 70% of *answerable* questions, which
+    is a bad trade whenever the documents usually do hold the answer; the two cross at roughly a
+    55% answerable share. See docs/architecture.md §1.9a and data/eval/reports/refusal-*.json.
+    """
     grader = build_relevance_grader(Settings(), client=FakeStreamClient())
+
+    assert isinstance(grader, LlmRelevanceGrader)
+
+
+def test_factory_selects_the_score_threshold_grader_when_configured() -> None:
+    """The free escape hatch, for a corpus that usually holds the answer or a key with no
+    headroom for ~3 calls per turn. A 0.0 floor grades only a *literally empty* retrieval weak —
+    the one signal cosine can be trusted on, since the score bands for correct and incorrect
+    retrievals overlap (correct 0.424-0.696, incorrect 0.389-0.462)."""
+    grader = build_relevance_grader(
+        Settings(relevance_grader="score-threshold"), client=FakeStreamClient()
+    )
 
     assert isinstance(grader, ScoreThresholdGrader)
     assert grader.threshold == 0.0
     assert asyncio.run(grader.grade(query="q", results=(_result("c1", 0.01),))).relevant is True
     assert asyncio.run(grader.grade(query="q", results=())).relevant is False
-
-
-def test_factory_selects_the_llm_grader_when_configured() -> None:
-    grader = build_relevance_grader(
-        Settings(relevance_grader="llm"), client=FakeStreamClient()
-    )
-
-    assert isinstance(grader, LlmRelevanceGrader)
 
 
 # --- the prompt the judge actually sees ----------------------------------------------------------

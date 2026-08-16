@@ -16,12 +16,15 @@ detector** (no per-query network) or the google detector. Product layer ✅ — 
 SSE streaming + multi-turn context (M15), Next.js frontend (M16), production hardening + CI (M17),
 **per-chat documents** (M18). The embedded-Chroma multi-process defect — the last known technical
 debt — is **fixed** (reload-on-change); the FAISS store added for it was removed as redundant.
-**Known open issue:** the default grader lets the model answer unanswerable questions 61% of the
-time, with a citation attached to an unrelated passage. Measured, documented, no free fix — see
-"Hallucination on unanswerable questions" below.
+**Known open cost:** the default grader (`llm`, flipped from `score-threshold` on 2026-08-17)
+refuses ~70% of questions the documents *can* answer, and costs ~3 provider calls per turn. That
+is the accepted price of never fabricating a cited answer — the cheap grader did so 61% of the
+time on out-of-corpus questions. Three attempts at a middle setting have been measured and all
+failed; see "Hallucination on unanswerable questions" below.
 **Next candidates (none started, all optional):** MuRIL-for-retrieval; torch-image slimming;
 hybrid BM25 + reranking.
-**In flight:** nothing. M19 and its close-out are done; see M19 for the open caveats.
+**In flight:** nothing. M19, its close-out, and the M20 grounding-gate experiment are done; see
+M19 for the open caveats.
 
 ---
 
@@ -713,6 +716,39 @@ truncated grader evidence.
 
 ---
 
+## M20 — the grounding gate, and the default flip ✅
+
+Built test-first. One new port and one new node, plus a settings flip that is the actual product
+change.
+
+- ✅ **`GroundingJudge` port** (`agent/grounding/base.py`) + factory. Sync, because the only
+  implementation is `LlmFaithfulnessJudge` from `evaluation/llm_judge.py` — reused rather than
+  forked, so the offline faithfulness number and the live gate score the same prompt. The node
+  bridges with `asyncio.to_thread`.
+- ✅ **`ground_check` node** between `generate` and END. Returns `{}` and costs nothing when the
+  gate is off (the default), so the node is always in the topology and the decision is visible in
+  `draw_mermaid()` rather than hidden in a branch.
+- ✅ **Gated generation buffers.** `generate` suppresses `Token` emission when a judge is present;
+  `ground_check` releases the whole text at once if it passes, or emits nothing and routes to
+  `generate_no_context`. Without this the gate would be decorative — the first RED run proved it,
+  streaming `Bharat ka rajdhaan Dilli hai. [1]Your documents don't cover that.` to the client.
+- ✅ **Fails open** on judge error, like `LlmRelevanceGrader`.
+- ✅ **Recursion limit is now exactly saturated.** The longest gated path (condense → one repair →
+  grounding rejection) is 11 super-steps against a limit of 11. Pinned by a test that was verified
+  to fail at slack 7, so the next node added breaks a test instead of a rare branch.
+- ✅ `scripts/eval_refusal.py --grounding-gate`; report in
+  `data/eval/reports/refusal-grounding-gate.json`.
+- ✅ **Default flipped to `RELEVANCE_GRADER=llm`.** The gate itself is dominated and ships off; the
+  measurement it produced is what settled the default. Details below.
+
+Gates: 250 tests / 2 skipped, ruff clean, mypy clean over 98 files, frontend lint + build clean.
+
+**What this cost that a reviewer should know:** the default now makes ~3 provider calls per turn
+instead of 1, refuses ~70% of answerable questions, and `scripts/eval_romanized.py`'s `agentic`
+condition now makes real provider calls unless given `--grader score-threshold`.
+
+---
+
 ## Hallucination on unanswerable questions ⚠️ open
 
 Found by **manual testing**, not by the suite. A chat holding one health document answered
@@ -726,23 +762,43 @@ answerable, so **no configuration could ever be scored on refusal quality**.
 
 Measured, 20 per set, llama-3.1-8b:
 
-| grader | routing | hallucinated | false refusals |
-|---|---|---|---|
-| `score-threshold` (default) | refuse only when empty | **61%** | 21% |
-| `llm` | refuse on any weak grade | **0%** | **70%** |
-| `llm` | answer when non-empty *(reverted)* | 55% | 25% |
+| config | routing | hallucinated | false refusals | calls/turn |
+|---|---|---|---|---|
+| `llm` **(now the default)** | refuse on any weak grade | **0%** | **70%** | ~3 |
+| `score-threshold` (was the default) | refuse only when empty | **61%** | 21% | 1 |
+| `+ GROUNDING_GATE` | judge the *answer*, then refuse | 40% | 55% | 2 |
+| `llm`, answer when non-empty *(reverted)* | — | 55% | 25% | ~3 |
 
-**Row 3 was my hypothesis and it was wrong.** I expected the llm grader to know *which* answers
+**Row 4 was my hypothesis and it was wrong.** I expected the llm grader to know *which* answers
 would be fabricated, so we could keep its judgement and stop escalating to a hard refusal. It
 doesn't — it prevents hallucination purely by declining to answer, and removing the refusal
 brought hallucination back (0% → 55%). Reverted rather than kept, same as `retransliterate`.
 (Smaller corpus on that row; magnitudes noisy, direction not.)
 
-**No middle setting exists with this model.** The default keeps the product usable and accepts the
-worse failure mode — a fabricated citation looks like evidence. Documented loudly instead of
-buried. Unmeasured routes out: a generation model that actually obeys "answer only from context",
-a judge that clears the bar (none reachable does), or a post-generation grounding check reusing
-`evaluation/llm_judge.py`.
+**Row 3 was the third attempt and it is dominated.** `GROUNDING_GATE` judges the finished answer
+against its passages rather than judging the retrieval — a genuinely different signal, built
+test-first as `agent/grounding/` + a `ground_check` node, and it does move the number. But scoring
+a turn as correct when it answers an answerable question or refuses an unanswerable one, with `p`
+the answerable share: gate = `0.60 − 0.15p`, `score-threshold` = `0.39 + 0.40p`, `llm` =
+`1.00 − 0.70p`. The gate beats `score-threshold` only below `p = 0.38` and `llm` only above
+`p = 0.73` — ranges that don't overlap, so no query mix makes it right. Shipped off; kept because
+it is tested infrastructure a stronger judge would revive.
+
+**Default flipped to `llm` (2026-08-17).** The two graders cross at `p ≈ 0.55`, and for a per-chat
+document-QA product `p` is realistically well above that — the arithmetic favours
+`score-threshold` (75% vs 37% at `p = 0.9`). Flipped anyway, deliberately: a confident fabrication
+carrying a citation is worse to ship than an unhelpful "I couldn't find that", because the citation
+makes the error look verified. The cost is real and is documented everywhere it is visible —
+70% of answerable questions refused, ~3 provider calls per turn.
+
+**Consequence for every other number in this file:** all agent-vs-no-agent retrieval comparisons
+recorded above predate the flip and are `score-threshold` measurements. They were not re-run,
+because XQuAD has no unanswerable questions and the new default's entire behaviour is to refuse —
+it would score worse there by construction, and that would not be a regression.
+
+Unmeasured routes out: a generation model that actually obeys "answer only from context", or a
+judge that clears the bar (none reachable does). A better judge improves the default *and* the
+gate at once — the highest-leverage change left.
 
 Two bugs fell out of building this, both real and both fixed:
 - **`generation_stream_corrupt`** — a malformed SSE frame raises `json.JSONDecodeError`, a

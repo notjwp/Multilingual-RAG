@@ -14,6 +14,8 @@ from fastapi import status
 from multilingual_rag.agent.grading.base import RelevanceGrader
 from multilingual_rag.agent.grading.factory import build_relevance_grader
 from multilingual_rag.agent.graph import RagGraph, build_graph
+from multilingual_rag.agent.grounding.base import GroundingJudge
+from multilingual_rag.agent.grounding.factory import build_grounding_judge
 from multilingual_rag.agent.nodes import RagNodes
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.errors import AppError
@@ -58,8 +60,14 @@ def build_rag_graph(
     retriever: Retriever | None = None,
     client: StreamClient | None = None,
     grader: RelevanceGrader | None = None,
+    judge: GroundingJudge | None = None,
 ) -> RagGraph:
-    """Assemble the agent graph. Every dependency is overridable for tests."""
+    """Assemble the agent graph. Every dependency is overridable for tests.
+
+    ``judge`` is the one override that also *enables* a feature: the grounding gate is off unless
+    ``GROUNDING_GATE`` is set, so passing a judge here is how a test turns it on without a
+    provider key.
+    """
     resolved_client = client if client is not None else build_stream_client(settings)
     nodes = RagNodes(
         settings,
@@ -68,5 +76,6 @@ def build_rag_graph(
         grader=grader
         if grader is not None
         else build_relevance_grader(settings, client=resolved_client),
+        judge=judge if judge is not None else build_grounding_judge(settings),
     )
     return RagGraph(build_graph(nodes), max_repairs=settings.agent_max_repairs)

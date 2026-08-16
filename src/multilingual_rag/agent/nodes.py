@@ -24,6 +24,7 @@ from openai import OpenAIError
 
 from multilingual_rag.agent.events import Done, Step, Token, emit
 from multilingual_rag.agent.grading.base import Grade, RelevanceGrader
+from multilingual_rag.agent.grounding.base import GroundingJudge
 from multilingual_rag.agent.repair import (
     REPAIR_REWRITE_SYSTEM,
     RepairStrategy,
@@ -56,9 +57,13 @@ from multilingual_rag.generation.prompts import (
     build_no_context_prompt,
 )
 from multilingual_rag.retrieval.base import Retriever
+from multilingual_rag.retrieval.context import format_context
 
 GradeRoute = Literal["generate", "repair", "generate_no_context"]
 EntryRoute = Literal["condense", "route_language"]
+GroundRoute = Literal["end", "generate_no_context"]
+
+GROUND_CHECK_LABEL = "Checking the answer against your documents"
 
 
 def _is_better(new: Grade, best: Grade | None) -> bool:
@@ -78,7 +83,7 @@ def _is_better(new: Grade, best: Grade | None) -> bool:
 
 
 class RagNodes:
-    """The seven nodes and two edge routers of the agentic RAG graph."""
+    """The eight nodes and three edge routers of the agentic RAG graph."""
 
     def __init__(
         self,
@@ -87,11 +92,13 @@ class RagNodes:
         retriever: Retriever,
         client: StreamClient,
         grader: RelevanceGrader,
+        judge: GroundingJudge | None = None,
     ) -> None:
         self.settings = settings
         self.retriever = retriever
         self.client = client
         self.grader = grader
+        self.judge = judge
         self.model = settings.generation_model
 
     # ── routers (pure; they may read state but never write it) ──────────────
@@ -115,6 +122,14 @@ class RagNodes:
         if self._next_strategy(state) is None:
             return "generate_no_context"
         return "repair"
+
+    def after_ground_check(self, state: AgentState) -> GroundRoute:
+        """Throw away an answer the judge could not ground, and refuse instead.
+
+        ``is False`` rather than ``not``: ``None`` means the gate never ran (it is off by
+        default), and that must route to ``end``, not to a refusal.
+        """
+        return "generate_no_context" if state["grounded"] is False else "end"
 
     def _next_strategy(self, state: AgentState) -> RepairStrategy | None:
         """Recomputed in both the router and the repair node — it is pure and cheap, and routers
@@ -293,8 +308,10 @@ class RagNodes:
             context = context.model_copy(update={"query": state["question"]})
         response_language = self._response_language(state, context, context.results)
         prompt = build_answer_prompt(context, response_language=response_language)
+        # Gated: hold the draft back. ``ground_check`` releases it only if the judge grounds it —
+        # a hallucination the user has already read cannot be recalled by a later refusal.
         answer_text = await self._stream_answer(
-            system=SYSTEM_INSTRUCTIONS, prompt=prompt, state=state
+            system=SYSTEM_INSTRUCTIONS, prompt=prompt, state=state, deliver=self.judge is None
         )
         # Drop markers that resolve to nothing before the text reaches the client, or the UI
         # renders a superscript citation with no matching source (see citations.py).
@@ -303,8 +320,49 @@ class RagNodes:
             language=response_language,
             citations=answer_citations(answer_text, context.results),
         )
-        emit(Done(answer))
+        if self.judge is None:
+            emit(Done(answer))
         return {"answer": answer, "context": context}
+
+    async def ground_check(self, state: AgentState) -> AgentUpdate:
+        """Ask whether the drafted answer is actually supported, before the user sees it.
+
+        A no-op node when the gate is off, which is the default — no provider call, no step, and
+        ``after_ground_check`` falls straight through to END.
+        """
+        answer = state["answer"]
+        if self.judge is None or answer is None:
+            return {}
+
+        emit(Step(id="ground_check", node="ground_check", status="running",
+                  label=GROUND_CHECK_LABEL))
+        try:
+            supported = await asyncio.to_thread(
+                self.judge.is_supported,
+                answer=answer.answer,
+                context=format_context(self._require_context(state)),
+            )
+        except (AppError, OpenAIError):
+            # Fail open, the same contract as LlmRelevanceGrader. A 502 on the safety check is
+            # not evidence the answer was wrong; failing closed would turn one provider blip
+            # into every answer in the product becoming "your documents don't cover this".
+            supported = True
+        emit(
+            Step(
+                id="ground_check",
+                node="ground_check",
+                status="done",
+                label=GROUND_CHECK_LABEL,
+                detail=None if supported else "not supported — answering without it",
+            )
+        )
+        if supported:
+            # Release the draft ``generate`` buffered. One Token, not many: the answer was already
+            # complete before the judge saw it, so there is no per-token stream left to replay —
+            # pretending otherwise would only fake a progressiveness the gate traded away.
+            emit(Token(answer.answer))
+            emit(Done(answer))
+        return {"grounded": supported}
 
     async def generate_no_context(self, state: AgentState) -> AgentUpdate:
         """Say plainly that the documents don't cover it, with guaranteed-empty citations."""
@@ -347,11 +405,16 @@ class RagNodes:
             state["preferred_language"], detected or context.query_language, results
         )
 
-    async def _stream_answer(self, *, system: str, prompt: str, state: AgentState) -> str:
+    async def _stream_answer(
+        self, *, system: str, prompt: str, state: AgentState, deliver: bool = True
+    ) -> str:
         """Stream the model's reply, emitting tokens as they arrive, and return the whole text.
 
         Always streams, even for the blocking routes: under ``ainvoke`` ``emit`` is a no-op and
         this simply accumulates. That is why generation no longer needs a blocking twin.
+
+        ``deliver=False`` accumulates without emitting — the grounding gate's buffered draft,
+        which ``ground_check`` releases in one piece once it is judged supported.
         """
         emit(Step(id="generate", node="generate", status="running", label="Writing the answer"))
         parts: list[str] = []
@@ -360,7 +423,8 @@ class RagNodes:
                 model=self.model, system=system, prompt=prompt, history=state["history"]
             ):
                 parts.append(delta)
-                emit(Token(delta))
+                if deliver:
+                    emit(Token(delta))
         except OpenAIError as exc:
             raise generation_app_error(exc, self.model) from exc
 

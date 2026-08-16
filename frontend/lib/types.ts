@@ -77,7 +77,14 @@ export interface ApiErrorBody {
 // `id` is stable across the running→done pair, so the client upserts rather than appending twice.
 export interface AgentStep {
   id: string;
-  node: "condense" | "route_language" | "retrieve" | "grade" | "repair" | "generate";
+  node:
+    | "condense"
+    | "route_language"
+    | "retrieve"
+    | "grade"
+    | "repair"
+    | "generate"
+    | "ground_check";
   status: "running" | "done";
   label: string;
   detail?: string | null;

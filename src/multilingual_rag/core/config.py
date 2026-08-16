@@ -100,29 +100,55 @@ class Settings(BaseSettings):
     retrieval_top_k: int = Field(default=8, gt=0)
 
     # Agentic retrieval loop: how a weak retrieval is detected, and how many repairs it may try.
-    # Both defaults below were set by measurement; neither is a hedge. See
-    # agent/grading/score_threshold.py for the distributions and scripts/eval_romanized.py to
-    # re-derive them.
+    # These defaults were set by measurement, not caution. See scripts/eval_refusal.py for the
+    # numbers below and scripts/eval_romanized.py for the retrieval side.
     #
-    # score-threshold + a 0.0 floor means only a *literally empty* retrieval counts as weak, so
-    # the repair loop almost never fires. That is the honest setting for this corpus:
-    #   - a cosine floor cannot separate "search failed" from "search worked but scored low" —
-    #     the bands overlap (correct 0.424-0.696, incorrect 0.389-0.462), and every positive floor
-    #     tried scored *below* having no agent at all (best: 0.767 vs 0.800)
-    #   - "llm" can judge relevance in principle, but meta/llama-3.1-8b-instruct false-alarms on
-    #     81% of correct retrievals (13/16 measured), fires on ~95% of queries, and costs a
-    #     provider call each time. A bigger judge model may change that; this one does not.
+    # ⚠️ THE DEFAULT IS DELIBERATELY THE EXPENSIVE, CAUTIOUS ONE, and it costs real usability.
+    # Measured on 20 questions per set with llama-3.1-8b (data/eval/reports/refusal-*.json):
     #
-    # ⚠️ THE DEFAULT HAS A KNOWN COST, and it is not a small one. On questions the documents cannot
-    # answer, score-threshold lets the model answer anyway **61% of the time**, usually with a
-    # citation attached to an unrelated passage (scripts/eval_refusal.py,
-    # data/eval/reports/refusal-*.json). Switching to "llm" drops that to 0% — but refuses 70% of
-    # questions the documents *can* answer. There is no middle setting with this model: the llm
-    # grader prevents hallucination *by declining to answer*, so removing the refusal brings the
-    # hallucination straight back (measured: 0% -> 55%). Pick the failure you can live with.
-    relevance_grader: Literal["score-threshold", "llm"] = "score-threshold"
+    #   grader            hallucinates on   refuses answerable   provider calls
+    #   ----------------  ----------------  -------------------  --------------
+    #   llm (default)                   0%                  70%             ~3
+    #   score-threshold                61%                  21%              1
+    #   + grounding gate               40%                  55%              2
+    #
+    # "Hallucinates" means: asked something the documents cannot answer, it answered anyway from
+    # parametric knowledge and attached a citation to an unrelated passage — a fabrication dressed
+    # as evidence. The llm grader eliminates that, and pays by refusing most questions the
+    # documents *can* answer. Which is better depends entirely on how often your corpus actually
+    # holds the answer; the two cross at roughly a 55% answerable share, and this project chose
+    # the side that never fabricates.
+    #
+    # Two things NOT to try, both already measured and reverted:
+    #   - keeping the llm grader's judgement but answering anyway when retrieval is non-empty:
+    #     hallucination goes straight back (0% -> 55%). It prevents fabrication *by refusing*.
+    #   - GROUNDING_GATE as a middle setting: it is dominated at every query mix (see that
+    #     setting's comment). There is no free point between these two.
+    #
+    # Set RELEVANCE_GRADER=score-threshold if your corpus usually holds the answer, or if ~3 calls
+    # per turn does not fit your key. With a 0.0 floor it grades only an *empty* retrieval weak:
+    # the cosine bands for correct and incorrect retrievals overlap (correct 0.424-0.696,
+    # incorrect 0.389-0.462), so every positive floor tried scored below having no agent at all
+    # (best 0.767 vs 0.800).
+    relevance_grader: Literal["score-threshold", "llm"] = "llm"
     relevance_score_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
     agent_max_repairs: int = Field(default=1, ge=0)
+
+    # Post-generation grounding gate: draft the answer, then ask the judge whether every claim is
+    # supported by the retrieved passages, and replace it with a refusal if not. Attacks the
+    # problem from the other side — relevance_grader judges the *retrieval*, this judges the
+    # *answer*.
+    #
+    # ⚠️ MEASURED AND DOMINATED — off, and not a knob worth reaching for. It scores 40%
+    # hallucination / 55% false refusals, which beats score-threshold only when under ~38% of
+    # questions are answerable and beats the llm grader only when over ~73% are. Those ranges do
+    # not overlap, so there is no query mix where this is the right choice. Kept because it is
+    # tested, working infrastructure and the third measured point on the curve — a stronger judge
+    # model could move it — not because it is currently useful.
+    #
+    # It also buffers: the answer cannot stream token-by-token, because you cannot un-send a
+    # hallucination the user has already read. See docs/architecture.md §1.9a.
+    grounding_gate: bool = False
 
     # Multi-turn chat: how many prior messages to feed the answer model (and the query-rewrite
     # step) as conversation history. ~5 exchanges. 0 disables history (single-shot per turn).

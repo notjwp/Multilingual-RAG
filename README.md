@@ -196,9 +196,10 @@ Everything lives in `.env` (copy it from `.env.example`). The settings you're mo
 | `EMBEDDING_PROVIDER` | `bge-m3` (local, free, default) or `openai` |
 | `JWT_SECRET_KEY` | Login-token signing key. **Must** be changed for real deployments |
 | `RETRIEVAL_TOP_K` | How many passages to feed the model (default: 8) |
-| `RELEVANCE_GRADER` | How the agent judges a search: `score-threshold` (free, default) or `llm` |
-| `RELEVANCE_SCORE_THRESHOLD` | Below this score a search counts as weak and triggers a retry. Default `0.0` = only retry on an empty result; higher values were measured and made things worse |
+| `RELEVANCE_GRADER` | How the agent judges a search: `llm` (default — never fabricates, but refuses a lot) or `score-threshold` (free, 1 call instead of ~3, answers more but makes things up 61% of the time on out-of-corpus questions) |
+| `RELEVANCE_SCORE_THRESHOLD` | Only used by `score-threshold`. Below this score a search counts as weak and triggers a retry. Default `0.0` = only retry on an empty result; higher values were measured and made things worse |
 | `AGENT_MAX_REPAIRS` | How many retries per question (default: 1 — raising it multiplies cost) |
+| `GROUNDING_GATE` | Judge the finished answer against its passages and refuse if unsupported. Off — measured, and dominated by both grader settings at every query mix |
 
 ---
 
@@ -344,9 +345,10 @@ You can watch it work: the chat shows what it's doing as it goes, then collapses
 ✓ Writing the answer
 ```
 
-By default the "was that good enough?" check is free — no extra model call — so a normal answer
-still costs two calls, not five. An LLM judge is available via `RELEVANCE_GRADER=llm` if you'd
-rather trade credits for real judgement.
+By default the "was that good enough?" check is a real model call, and it fires on nearly every
+query — so a normal answer costs about three calls, not one. `RELEVANCE_GRADER=score-threshold`
+makes the check free and cuts that to one, at the cost described under
+[the honest limitation](#the-honest-limitation-it-refuses-a-lot-of-questions-it-could-answer).
 
 ### What it measures out at — and why that's a "no change"
 
@@ -360,6 +362,11 @@ Measured on the full corpus — 150 questions against 20,240 documents:
 | **Without the agent** | **0.852** |
 | **With the agent** | **0.852** |
 
+*Both agent rows were measured with `RELEVANCE_GRADER=score-threshold`, which was the default at
+the time. The default is now `llm`, chosen on refusal quality rather than retrieval — it has not
+been re-measured on this benchmark, and it would score worse here, because XQuAD contains only
+answerable questions and this grader's whole behaviour is to refuse.*
+
 Parity. The agent doesn't improve retrieval here, and the reason is worth stating plainly: the
 check can't reliably tell *"this search failed"* from *"this search worked but scored low."* Those
 two overlap almost completely. Every threshold that catches real failures also condemns correct
@@ -372,24 +379,39 @@ attempt, never merely the last), it catches the empty-result case, and it refuse
 of inventing an answer. What it genuinely bought was structural — one orchestration where there
 were three, and tenancy that a prompt can't talk its way past.
 
-### The honest limitation: it will answer questions your documents can't
+### The honest limitation: it refuses a lot of questions it could answer
 
-Ask something your documents don't cover and, **about 61% of the time, it answers anyway** — from
-the model's own knowledge, with a citation pointing at whichever passage happened to rank highest.
-The citation looks like evidence and isn't. Measured with `scripts/eval_refusal.py`.
+Ask something your documents *do* cover and, **about 70% of the time, it says it can't find it
+anyway**. That is the price of the default, and it is deliberate.
 
-Turning it off is one setting, `RELEVANCE_GRADER=llm`, and it works completely — 0% hallucination.
-But it then refuses **70%** of questions your documents *do* answer, which is worse as a product.
-There's no middle: that grader avoids making things up by declining to answer, so you cannot keep
-the safety and drop the refusals (tried and measured; it goes straight back to 55%).
+The alternative is worse. With the free `score-threshold` grader, asking something the documents
+*don't* cover gets an answer **61% of the time** — invented from the model's own knowledge, with a
+citation pointing at whichever passage ranked highest. The citation looks like evidence and isn't.
+A confident fabrication that cites a source is a worse thing to ship than an unhelpful "I don't
+know", so the default is the one that never does it.
 
-The default therefore keeps the system useful and accepts the worse failure. That's a real
-tradeoff of small-model RAG rather than something a prompt fixes, and the numbers are in
-`data/eval/reports/` if you want to check the reasoning.
+Measured with `scripts/eval_refusal.py`, 20 questions per set:
 
-Notably, **no automated test caught this** — every metric ran on a benchmark where every question
-has an answer, so a hallucination rate and a good recall score coexisted happily. It took someone
-uploading a document and asking an unrelated question.
+| setting | makes things up | refuses answerable | calls/turn |
+|---|---|---|---|
+| `RELEVANCE_GRADER=llm` (default) | **0%** | 70% | ~3 |
+| `RELEVANCE_GRADER=score-threshold` | 61% | **21%** | 1 |
+| `GROUNDING_GATE=true` | 40% | 55% | 2 |
+
+There is no free point between them. The llm grader avoids fabricating *by declining to answer* —
+keep its judgement but answer anyway and hallucination returns immediately (measured: 0% → 55%,
+reverted). The grounding gate, which judges the finished answer instead of the retrieval, is
+dominated at every query mix: better than `score-threshold` only below a 38% answerable share,
+better than `llm` only above 73%, and those don't overlap.
+
+**Which default is right depends on your corpus.** The two graders cross at roughly a 55%
+answerable share. If your users mostly ask about a document they just uploaded, `score-threshold`
+is the better product and a one-line change. This project picks the side that never invents a
+citation.
+
+Notably, **no automated test caught the original problem** — every metric ran on a benchmark where
+every question has an answer, so a hallucination rate and a good recall score coexisted happily.
+It took someone uploading a document and asking an unrelated question.
 
 ### The bug this exercise found
 

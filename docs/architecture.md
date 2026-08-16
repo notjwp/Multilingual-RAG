@@ -352,16 +352,20 @@ A fourth strategy, `retransliterate` (retry through a second renderer), was buil
 **removed**: its justification came from the rigged harness described in §3, and on honest queries
 it rescued 4 misses while breaking 3 — noise.
 
-With the default grader this only runs when retrieval returned *nothing at all*, so every strategy
-here is strictly safe: there is no incumbent result to damage.
+Under `score-threshold` this only runs when retrieval returned *nothing at all*, so every strategy
+here is strictly safe: there is no incumbent result to damage. Under the shipped `llm` grader it
+fires on nearly every query, which is where the ~3-calls-per-turn figure comes from.
 
-**Grading is a port** (`agent/grading/`). `ScoreThresholdGrader` is the default and costs nothing,
-which keeps a turn at two provider calls. `LlmRelevanceGrader` is opt-in, costs one call per
-attempt, and **fails open**: an unparseable verdict or any `OpenAIError` grades as relevant,
-because a flaky judge must never cost the user an answer.
+**Grading is a port** (`agent/grading/`). `LlmRelevanceGrader` is the default: one call per
+attempt, and it **fails open** — an unparseable verdict or any `OpenAIError` grades as relevant,
+because a flaky judge must never cost the user an answer. `ScoreThresholdGrader` costs nothing and
+keeps a turn at one call; it is the opt-out for corpora that usually hold the answer. The default
+was flipped *to* the expensive one on refusal evidence (§1.9a) after being `score-threshold`
+through M19 — every agent-vs-no-agent retrieval number recorded in this document predates that and
+is a `score-threshold` measurement.
 
-**The default floor is 0.0 — only an *empty* retrieval counts as weak — and that is a measured
-retreat, not a conservative guess.** The reasoning is worth reading before raising it:
+**`score-threshold`'s floor is 0.0 — only an *empty* retrieval counts as weak — and that is a
+measured retreat, not a conservative guess.** The reasoning is worth reading before raising it:
 
 - The distinction from `transliteration/detect.py`'s "score-based routing proved unreliable at
   scale" holds in principle: that was a **relative** judgement between two query forms, an abstain
@@ -372,8 +376,8 @@ retreat, not a conservative guess.** The reasoning is worth reading before raisi
 - Acting on it **lost**: recall@5 0.767 against 0.800 for the plain pipeline, and that is the best
   of three selection rules tried (0.733 → 0.750 → 0.767, all below 0.800). Full progression in
   `docs/progress.md`.
-- So the free grader keeps only the arm it can defend. Real judgement needs a judge; that is what
-  `RELEVANCE_GRADER=llm` is for.
+- So the free grader keeps only the arm it can defend. Real judgement needs a judge — which is
+  what the default now is, at the cost §1.9a records.
 
 **Never regress.** Generation answers from `best_context`, not the latest attempt: a repair is a
 bet and it can lose, so `grade` only promotes an attempt that flips weak→relevant. Deliberately
@@ -433,25 +437,65 @@ citations** — never by phrase matching, which would break across languages.
 
 Measured, 20 questions per set, `llama-3.1-8b` (`data/eval/reports/refusal-*.json`):
 
-| grader | routing | hallucinated | false refusals |
-| --- | --- | --- | --- |
-| `score-threshold` **(default)** | refuse only when empty | **61%** | 21% |
-| `llm` | refuse on any weak grade | **0%** | **70%** |
-| `llm` | answer when retrieval non-empty | 55% | 25% |
+| config | routing | hallucinated | false refusals | calls/turn |
+| --- | --- | --- | --- | --- |
+| `llm` **(default)** | refuse on any weak grade | **0%** | **70%** | ~3 |
+| `score-threshold` | refuse only when empty | **61%** | 21% | 1 |
+| `+ GROUNDING_GATE` | judge the *answer*, then refuse | 40% | 55% | 2 |
+| `llm`, answer when retrieval non-empty | *(reverted)* | 55% | 25% | ~3 |
 
-**Row 3 is the experiment that failed, and it is the informative one.** The hypothesis was that
-the LLM grader knew *which* answers would be fabricated, so we could keep its judgement and stop
-escalating it to a hard refusal. It does not. It prevents hallucination purely by declining to
-answer — remove the refusal and hallucination returns (0% → 55%). The change was reverted rather
-than kept. (Row 3 used a smaller corpus; its exact magnitudes are noisy, but the direction is far
-too large to be sampling error.)
+**The last row is the experiment that failed, and it is the informative one.** The hypothesis was
+that the LLM grader knew *which* answers would be fabricated, so we could keep its judgement and
+stop escalating it to a hard refusal. It does not. It prevents hallucination purely by declining
+to answer — remove the refusal and hallucination returns (0% → 55%). Reverted rather than kept.
+(That row used a smaller corpus; its exact magnitudes are noisy, the direction is not.)
 
-**So there is no middle setting with this model.** 61% hallucination at 21% false refusals, or 0%
-hallucination at 70% false refusals. The default keeps the product usable and accepts the worse
-failure — a fabricated citation reads as evidence, which is why this is documented loudly rather
-than buried. Routes to an actual fix, none yet measured: a stronger generation model that obeys
-"answer only from the provided context", a stronger judge (§1.9 — none reachable on this endpoint
-clears the bar), or a post-generation grounding check reusing `evaluation/llm_judge.py`.
+**The grounding gate is the third attempt, and it is dominated.** `GROUNDING_GATE=true` adds a
+`ground_check` node after `generate`: the drafted answer and its passages go to
+`LlmFaithfulnessJudge` (the `GroundingJudge` port, `agent/grounding/`, bridged with
+`asyncio.to_thread` because the judge is sync), and an unsupported answer is thrown away and
+routed to `generate_no_context`. It judges the **answer**, where the grader judges the
+**retrieval** — a genuinely different signal, and it does move the number (61% → 40%).
+
+It still isn't worth enabling. Scoring a turn as correct when it answers an answerable question or
+refuses an unanswerable one, with `p` the share of questions the corpus can actually answer:
+
+| config | score |
+| --- | --- |
+| `llm` | `1.00 − 0.70p` |
+| `score-threshold` | `0.39 + 0.40p` |
+| `GROUNDING_GATE` | `0.60 − 0.15p` |
+
+The gate beats `score-threshold` only below `p = 0.38` and beats `llm` only above `p = 0.73`.
+Those ranges do not overlap, so **there is no query mix where it is the right choice** — it is not
+a point on the tradeoff curve, it is under it. It ships off, and stays in the tree only because it
+is tested infrastructure that a stronger judge model would immediately improve.
+
+Two structural consequences worth knowing even though the gate is off:
+
+- **A gated answer cannot stream.** `generate` buffers instead of emitting `Token`s, and
+  `ground_check` releases the whole text at once if it passes. A gate that fired *after* the draft
+  had streamed would be decorative — the user has already read the fabrication, and the refusal
+  replacing it arrives too late. Pinned by
+  `test_the_grounding_gate_never_streams_the_text_of_an_unsupported_answer`.
+- **It fails open**, like `LlmRelevanceGrader`. A 502 on the safety check is not evidence the
+  answer was wrong, and failing closed would turn one provider blip into every answer in the
+  product becoming a refusal.
+
+**So the two graders are the real choice, and they cross at `p ≈ 0.55`.** Below that — a corpus
+that often lacks the answer — `llm` wins; above it, `score-threshold` wins, and at `p = 0.9` it
+wins decisively (75% vs 37%). **The shipped default is `llm`**, which is the *worse* choice for a
+per-chat document-QA product on that arithmetic. It is chosen anyway: a confident fabrication
+carrying a citation is a worse thing to ship than an unhelpful "I couldn't find that", because the
+citation makes the error look verified. `RELEVANCE_GRADER=score-threshold` is a one-line change for
+anyone who disagrees.
+
+All of these are n=20 per set. Single-digit differences are noise; the 61-vs-0 gap is not.
+
+Unmeasured routes to an actual fix: a stronger generation model that obeys "answer only from the
+provided context", or a stronger judge (§1.9 — none reachable on this endpoint clears the bar).
+A better judge improves the default *and* the gate at once, which makes it the highest-leverage
+change available.
 
 **Steps on the wire.** `Step` events become SSE `event: step` frames
 (`{id, node, status, label, detail}`), emitted as **running → done pairs sharing an `id`** so the
@@ -461,8 +505,9 @@ deliberately plain-language ("Searching your documents") because a user reads th
 fact ("Hindi, typed in English letters") goes in `detail`, which the UI shows in its collapsed
 summary.
 
-**Settings.** `RELEVANCE_GRADER` (default `score-threshold`), `RELEVANCE_SCORE_THRESHOLD`
-(default `0.0`, see above), `AGENT_MAX_REPAIRS` (default `1`).
+**Settings.** `RELEVANCE_GRADER` (default `llm`), `RELEVANCE_SCORE_THRESHOLD` (default `0.0`,
+`score-threshold` only, see above), `AGENT_MAX_REPAIRS` (default `1`), `GROUNDING_GATE`
+(default off, §1.9a).
 
 **What this measures out at.** `scripts/eval_romanized.py` scores a fifth `agentic` condition by
 driving the real graph (generation stubbed, so the eval stays free). **Full corpus: XQuAD-hi,

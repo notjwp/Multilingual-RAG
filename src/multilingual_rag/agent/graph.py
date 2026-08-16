@@ -4,10 +4,15 @@
 START ─┬─(has history)─► condense ─┐
        └──(no history)─────────────┴─► route_language ─► retrieve ─► grade
                                                             ▲           │
-                                                            │  relevant │─► generate ─► END
-                                                         repair ◄───────┤ weak + retries
-                                                                        └─► generate_no_context
+                                        ┌───────────────────┤  relevant │
+                                        │                repair ◄───────┤ weak + retries
+                                        ▼                               │
+generate ─► ground_check ─(supported / gate off)─► END                  │
+                        └──(unsupported)──► generate_no_context ◄───────┘
 ```
+
+``ground_check`` is a no-op unless ``GROUNDING_GATE`` is set, which it is not by default — the
+node still runs, returns ``{}``, and routes straight to END without a provider call.
 
 Nothing outside this module imports LangGraph — routes and the chat service depend on
 :class:`RagGraph`, whose two methods are the whole surface.
@@ -40,8 +45,15 @@ from multilingual_rag.vectorstores.base import VectorFilter
 
 CompiledRagGraph = CompiledStateGraph[AgentState, Runtime[None], AgentState, AgentUpdate]
 
-# A happy path is six super-steps (entry branch, condense, route, retrieve, grade, generate);
-# each repair adds three (repair, retrieve, grade). The slack absorbs the entry branch and END.
+# A happy path is seven super-steps (entry branch, condense, route, retrieve, grade, generate,
+# ground_check — the last runs even when the gate is off, it just returns immediately);
+# each repair adds three (repair, retrieve, grade).
+#
+# At max_repairs=1 the limit is 11 and the longest real path — condense, one repair, then a
+# grounding rejection routed to generate_no_context — is *exactly* 11. There is no headroom left:
+# adding a node fails `test_the_longest_gated_path_stays_inside_the_recursion_limit` (verified by
+# dropping the slack to 7, which raises agent_recursion_limit). Raise this when that happens
+# rather than assuming the slack absorbs it.
 _RECURSION_SLACK = 8
 _STEPS_PER_REPAIR = 3
 
@@ -57,6 +69,7 @@ def build_graph(nodes: RagNodes) -> CompiledRagGraph:
     builder.add_node("grade", nodes.grade)
     builder.add_node("repair", nodes.repair)
     builder.add_node("generate", nodes.generate)
+    builder.add_node("ground_check", nodes.ground_check)
     builder.add_node("generate_no_context", nodes.generate_no_context)
 
     builder.add_conditional_edges(
@@ -77,7 +90,12 @@ def build_graph(nodes: RagNodes) -> CompiledRagGraph:
         },
     )
     builder.add_edge("repair", "retrieve")  # the cycle
-    builder.add_edge("generate", END)
+    builder.add_edge("generate", "ground_check")
+    builder.add_conditional_edges(
+        "ground_check",
+        nodes.after_ground_check,
+        {"end": END, "generate_no_context": "generate_no_context"},
+    )
     builder.add_edge("generate_no_context", END)
     return builder.compile()
 
@@ -201,4 +219,5 @@ class RagGraph:
             attempts=0,
             tried_strategies=(),
             answer=None,
+            grounded=None,
         )

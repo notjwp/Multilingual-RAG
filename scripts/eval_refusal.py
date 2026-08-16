@@ -33,7 +33,9 @@ call per query and keep ``--sample`` modest.
 
 Usage:
     python scripts/eval_refusal.py --sample 20
-    python scripts/eval_refusal.py --sample 20 --grader llm      # measure the tradeoff
+    python scripts/eval_refusal.py --sample 20 --grader llm         # measure the tradeoff
+    python scripts/eval_refusal.py --sample 20 --grounding-gate     # judge the answer, not the
+                                                                    # retrieval
 """
 
 from __future__ import annotations
@@ -142,6 +144,11 @@ def main() -> None:
         help="Override RELEVANCE_GRADER for this run.",
     )
     parser.add_argument(
+        "--grounding-gate", action="store_true",
+        help="Judge each drafted answer against its passages and refuse when unsupported. "
+             "Adds one provider call per answered turn, on top of the grader's.",
+    )
+    parser.add_argument(
         "--pace", type=float, default=1.0,
         help="Seconds between queries. NIM free tier is 40 RPM and the llm grader "
              "roughly triples calls per query.",
@@ -152,8 +159,10 @@ def main() -> None:
     settings = Settings(environment="test")
     if args.grader:
         settings = settings.model_copy(update={"relevance_grader": args.grader})
+    if args.grounding_gate:
+        settings = settings.model_copy(update={"grounding_gate": True})
     print(f"grader={settings.relevance_grader} threshold={settings.relevance_score_threshold} "
-          f"model={settings.generation_model}")
+          f"grounding_gate={settings.grounding_gate} model={settings.generation_model}")
 
     # The same romanized Hindi questions drive both sets; only the corpus changes.
     hi = load_xquad_corpus(XQUAD_DIR, ("hi",), sample=args.distractor_cap)
@@ -193,6 +202,7 @@ def main() -> None:
             json.dumps(
                 {
                     "grader": settings.relevance_grader,
+                    "grounding_gate": settings.grounding_gate,
                     "relevance_score_threshold": settings.relevance_score_threshold,
                     "generation_model": settings.generation_model,
                     "questions_per_set": len(questions),

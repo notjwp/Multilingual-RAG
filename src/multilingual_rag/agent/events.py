@@ -29,6 +29,7 @@ NodeName = Literal[
     "grade",
     "repair",
     "generate",
+    "ground_check",
 ]
 
 

@@ -46,6 +46,10 @@ class AgentState(TypedDict):
 
     # ── terminal ────────────────────────────────────────────────────────────
     answer: GeneratedAnswer | None
+    # The grounding gate's verdict on ``answer``. ``None`` means the gate never ran (it is off by
+    # default), which is why the router tests for ``is False`` rather than falsiness — "not
+    # judged" and "judged unfaithful" must not collapse into the same branch.
+    grounded: bool | None
 
 
 class AgentUpdate(TypedDict, total=False):
@@ -69,6 +73,7 @@ class AgentUpdate(TypedDict, total=False):
     attempts: int
     tried_strategies: tuple[RepairStrategy, ...]
     answer: GeneratedAnswer
+    grounded: bool
 
 
 @dataclass(frozen=True)
