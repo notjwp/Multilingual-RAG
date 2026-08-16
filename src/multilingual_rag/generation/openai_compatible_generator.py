@@ -134,12 +134,24 @@ class OpenAICompatibleStreamClient:
             messages=cast(Any, build_chat_messages(system, prompt, history)),
             stream=True,
         )
-        async for chunk in stream:
-            if not chunk.choices:  # e.g. a trailing usage-only chunk carries no delta
-                continue
-            delta = chunk.choices[0].delta.content
-            if delta:
-                yield delta
+        try:
+            async for chunk in stream:
+                if not chunk.choices:  # e.g. a trailing usage-only chunk carries no delta
+                    continue
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    yield delta
+        except ValueError as exc:
+            # A malformed SSE frame surfaces from the SDK as json.JSONDecodeError — a ValueError,
+            # *not* an OpenAIError — so it slips past every `except OpenAIError` upstream, escapes
+            # the graph, and reaches chat_stream.py, which only renders `event: error` for
+            # AppError. The stream would then just stop: no error frame, and a UI left hanging on
+            # a half-written bubble. Observed live against NIM after ~30 healthy calls.
+            raise AppError(
+                "The generation endpoint sent a malformed response; please retry.",
+                code="generation_stream_corrupt",
+                status_code=status.HTTP_502_BAD_GATEWAY,
+            ) from exc
 
     async def acomplete(self, *, model: str, system: str, prompt: str) -> str:
         response = await self._client.chat.completions.create(

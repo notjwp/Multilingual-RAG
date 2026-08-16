@@ -1,5 +1,8 @@
 """Generation against an OpenAI-compatible endpoint: grounding + the error contract. No network."""
 
+import asyncio
+import json
+
 import httpx
 import pytest
 from openai import NotFoundError, OpenAIError, RateLimitError
@@ -11,6 +14,7 @@ from multilingual_rag.core.models import ConversationTurn, RetrievalContext, Vec
 from multilingual_rag.generation.openai_compatible_generator import (
     OpenAICompatibleAnswerGenerator,
     OpenAICompatibleChatClient,
+    OpenAICompatibleStreamClient,
 )
 
 
@@ -167,3 +171,37 @@ def test_provider_is_just_a_url_not_a_code_path() -> None:
         assert isinstance(client, OpenAICompatibleChatClient)
         # The SDK normalises to a trailing slash; the configured host must be what we talk to.
         assert str(client._client.base_url).rstrip("/") == base_url.rstrip("/")
+
+
+def test_a_malformed_stream_frame_becomes_an_apperror_not_a_valueerror() -> None:
+    """Regression from a live run: the SDK raises json.JSONDecodeError (a ValueError) on a bad SSE
+    frame. That is not an OpenAIError, so it slipped past every handler, escaped the graph, and
+    reached chat_stream.py — which only renders `event: error` for AppError. The stream simply
+    stopped, leaving the UI on a half-written bubble."""
+
+    class _CorruptStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    class _Client:
+        class chat:  # noqa: N801 - mirrors the SDK's attribute layout
+            class completions:
+                @staticmethod
+                async def create(**_kwargs):
+                    return _CorruptStream()
+
+    client = OpenAICompatibleStreamClient.__new__(OpenAICompatibleStreamClient)
+    client._client = _Client()  # type: ignore[attr-defined]
+
+    async def _drain() -> None:
+        async for _ in client.astream_completion(model="m", system="s", prompt="p"):
+            pass
+
+    with pytest.raises(AppError) as caught:
+        asyncio.run(_drain())
+
+    assert caught.value.code == "generation_stream_corrupt"
+    assert caught.value.status_code == 502

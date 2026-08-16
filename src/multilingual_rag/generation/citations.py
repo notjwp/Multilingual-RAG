@@ -14,6 +14,10 @@ from collections.abc import Sequence
 from multilingual_rag.core.models import AnswerCitation, VectorSearchResult
 
 _MARKER = re.compile(r"\[(\d+)\]")
+# Inline code / fenced blocks, so a literal "[1]" in a snippet is never treated as a citation.
+_CODE_SPAN = re.compile(r"```.*?```|`[^`]*`", re.DOTALL)
+# Same marker, but capturing any space in front of it so a deletion leaves no double space.
+_MARKER_WITH_SPACE = re.compile(r"([ \t]*)\[(\d+)\]")
 
 
 def parse_cited_results(
@@ -53,3 +57,34 @@ def answer_citations(
         )
         for result in parse_cited_results(answer, results)
     )
+
+
+def strip_unresolvable_markers(answer: str, results: Sequence[VectorSearchResult]) -> str:
+    """Remove citation markers that point at nothing, leaving the resolvable ones intact.
+
+    ``parse_cited_results`` already ignores an out-of-range marker, but the *answer text* still
+    contains it, so the UI renders a superscript citation with no matching source. Seen live: an
+    answer written against 1 resolvable passage said "… swasthya hi dhan hai. [2]" and the reader
+    got a dangling [2].
+
+    Deliberately **does not renumber**. Rewriting ``[5]`` to ``[2]`` would invent an attribution
+    the model never made; deleting an unresolvable marker is honest, remapping it is not.
+
+    Markers inside inline code are left alone, matching the frontend's ``rehypeCitations``, which
+    skips ``code``/``pre`` — the two must agree or the rendered output disagrees with the parse.
+    """
+    spans = [match.span() for match in _CODE_SPAN.finditer(answer)]
+
+    def in_code(position: int) -> bool:
+        return any(start <= position < end for start, end in spans)
+
+    def replace(match: re.Match[str]) -> str:
+        # The pattern swallows any leading space, so removing a marker cannot leave a double
+        # space behind ("aur [5] mein" -> "aur mein"). Collapsing whitespace globally instead
+        # would reformat code spans, which must survive byte-for-byte.
+        if in_code(match.start()):
+            return match.group(0)
+        index = int(match.group(2)) - 1
+        return match.group(0) if 0 <= index < len(results) else ""
+
+    return _MARKER_WITH_SPACE.sub(replace, answer).strip()

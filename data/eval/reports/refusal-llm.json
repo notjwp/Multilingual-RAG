@@ -1,0 +1,16 @@
+{
+  "answerable": {
+    "answered": 6,
+    "refused": 14
+  },
+  "false_refusal_rate": 0.7,
+  "generation_model": "meta/llama-3.1-8b-instruct",
+  "grader": "llm",
+  "hallucination_rate": 0.0,
+  "questions_per_set": 20,
+  "relevance_score_threshold": 0.0,
+  "unanswerable": {
+    "answered": 0,
+    "refused": 20
+  }
+}

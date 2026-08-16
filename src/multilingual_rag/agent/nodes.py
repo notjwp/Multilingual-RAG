@@ -41,7 +41,7 @@ from multilingual_rag.core.models import (
     VectorSearchResult,
 )
 from multilingual_rag.generation.base import StreamClient
-from multilingual_rag.generation.citations import answer_citations
+from multilingual_rag.generation.citations import answer_citations, strip_unresolvable_markers
 from multilingual_rag.generation.contextualize import (
     CONTEXTUALIZE_SYSTEM,
     build_contextualize_prompt,
@@ -296,8 +296,10 @@ class RagNodes:
         answer_text = await self._stream_answer(
             system=SYSTEM_INSTRUCTIONS, prompt=prompt, state=state
         )
+        # Drop markers that resolve to nothing before the text reaches the client, or the UI
+        # renders a superscript citation with no matching source (see citations.py).
         answer = GeneratedAnswer(
-            answer=answer_text,
+            answer=strip_unresolvable_markers(answer_text, context.results),
             language=response_language,
             citations=answer_citations(answer_text, context.results),
         )
@@ -312,7 +314,13 @@ class RagNodes:
         answer_text = await self._stream_answer(
             system=NO_CONTEXT_SYSTEM, prompt=prompt, state=state
         )
-        answer = GeneratedAnswer(answer=answer_text, language=response_language, citations=())
+        # No context, so every marker is unresolvable — strip them all rather than show a
+        # refusal that appears to cite something.
+        answer = GeneratedAnswer(
+            answer=strip_unresolvable_markers(answer_text, ()),
+            language=response_language,
+            citations=(),
+        )
         emit(Done(answer))
         return {"answer": answer, "context": context}
 
