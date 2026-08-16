@@ -16,7 +16,9 @@ detector** (no per-query network) or the google detector. Product layer ✅ — 
 SSE streaming + multi-turn context (M15), Next.js frontend (M16), production hardening + CI (M17),
 **per-chat documents** (M18). The embedded-Chroma multi-process defect — the last known technical
 debt — is **fixed** (reload-on-change); the FAISS store added for it was removed as redundant.
-**No open bugs or known technical debt.**
+**Known open issue:** the default grader lets the model answer unanswerable questions 61% of the
+time, with a citation attached to an unrelated passage. Measured, documented, no free fix — see
+"Hallucination on unanswerable questions" below.
 **Next candidates (none started, all optional):** MuRIL-for-retrieval; torch-image slimming;
 hybrid BM25 + reranking.
 **In flight:** nothing. M19 and its close-out are done; see M19 for the open caveats.
@@ -708,6 +710,48 @@ The normal path masks it — Devanagari passages in the prompt make the model mi
 verdict; two tests pin it (router beats langdetect, explicit `preferred_language` still wins).
 Third defect this session that only a live run could surface, after the `asyncio.run` trap and the
 truncated grader evidence.
+
+---
+
+## Hallucination on unanswerable questions ⚠️ open
+
+Found by **manual testing**, not by the suite. A chat holding one health document answered
+`bharat ka rajdhaan kya hai?` with *"Bharat ka rajdhaan Dilli hai. [1]"* — parametric knowledge,
+citation attached to an unrelated passage.
+
+Every metric here was structurally blind to it: they all run on XQuAD, where every question is
+answerable, so **no configuration could ever be scored on refusal quality**.
+`scripts/eval_refusal.py` fixes that — same romanized Hindi questions against XQuAD-hi
+(answerable) and the Kannada corpus (unanswerable), refusal detected as zero resolved citations.
+
+Measured, 20 per set, llama-3.1-8b:
+
+| grader | routing | hallucinated | false refusals |
+|---|---|---|---|
+| `score-threshold` (default) | refuse only when empty | **61%** | 21% |
+| `llm` | refuse on any weak grade | **0%** | **70%** |
+| `llm` | answer when non-empty *(reverted)* | 55% | 25% |
+
+**Row 3 was my hypothesis and it was wrong.** I expected the llm grader to know *which* answers
+would be fabricated, so we could keep its judgement and stop escalating to a hard refusal. It
+doesn't — it prevents hallucination purely by declining to answer, and removing the refusal
+brought hallucination back (0% → 55%). Reverted rather than kept, same as `retransliterate`.
+(Smaller corpus on that row; magnitudes noisy, direction not.)
+
+**No middle setting exists with this model.** The default keeps the product usable and accepts the
+worse failure mode — a fabricated citation looks like evidence. Documented loudly instead of
+buried. Unmeasured routes out: a generation model that actually obeys "answer only from context",
+a judge that clears the bar (none reachable does), or a post-generation grounding check reusing
+`evaluation/llm_judge.py`.
+
+Two bugs fell out of building this, both real and both fixed:
+- **`generation_stream_corrupt`** — a malformed SSE frame raises `json.JSONDecodeError`, a
+  `ValueError`, not an `OpenAIError`. It slipped every handler, escaped the graph, and reached
+  `chat_stream.py`, which renders `event: error` only for `AppError` — so a live stream would just
+  stop, leaving the UI on a half-written bubble. Hit after ~30 healthy calls.
+- **Dangling citation markers** — `[2]` with one resolvable source rendered a superscript pointing
+  at nothing. Now stripped from the answer text; deliberately *not* renumbered, since remapping
+  would invent an attribution the model never made.
 
 ---
 

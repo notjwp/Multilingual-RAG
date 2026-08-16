@@ -418,6 +418,41 @@ is no `if streaming:` anywhere, which is what lets one node serve all three rout
 `chat_stream.py` renders `event: error` only for `AppError`; an unmapped escape would truncate the
 SSE response with no error frame. Verified: node exceptions propagate through `astream` unwrapped.
 
+### 1.9a The hallucination/refusal tradeoff — a known, measured, unresolved cost
+
+Manual testing exposed what every retrieval metric here was blind to. Against a chat holding one
+document about health, `bharat ka rajdhaan kya hai?` returned *"Bharat ka rajdhaan Dilli hai. [1]"*
+— answered from the model's own knowledge, with a citation attached to an unrelated passage.
+
+**Why no existing metric could see it.** They all run on XQuAD, where every question has an answer
+in the corpus. There is no such thing as a correct refusal there, so recall@5 of 0.852 and a
+majority hallucination rate coexist without contradiction. `scripts/eval_refusal.py` closes that
+gap: the same romanized Hindi questions are asked against XQuAD-hi (answerable) and against the
+committed Kannada corpus (unanswerable), and a refusal is detected structurally as **zero resolved
+citations** — never by phrase matching, which would break across languages.
+
+Measured, 20 questions per set, `llama-3.1-8b` (`data/eval/reports/refusal-*.json`):
+
+| grader | routing | hallucinated | false refusals |
+| --- | --- | --- | --- |
+| `score-threshold` **(default)** | refuse only when empty | **61%** | 21% |
+| `llm` | refuse on any weak grade | **0%** | **70%** |
+| `llm` | answer when retrieval non-empty | 55% | 25% |
+
+**Row 3 is the experiment that failed, and it is the informative one.** The hypothesis was that
+the LLM grader knew *which* answers would be fabricated, so we could keep its judgement and stop
+escalating it to a hard refusal. It does not. It prevents hallucination purely by declining to
+answer — remove the refusal and hallucination returns (0% → 55%). The change was reverted rather
+than kept. (Row 3 used a smaller corpus; its exact magnitudes are noisy, but the direction is far
+too large to be sampling error.)
+
+**So there is no middle setting with this model.** 61% hallucination at 21% false refusals, or 0%
+hallucination at 70% false refusals. The default keeps the product usable and accepts the worse
+failure — a fabricated citation reads as evidence, which is why this is documented loudly rather
+than buried. Routes to an actual fix, none yet measured: a stronger generation model that obeys
+"answer only from the provided context", a stronger judge (§1.9 — none reachable on this endpoint
+clears the bar), or a post-generation grounding check reusing `evaluation/llm_judge.py`.
+
 **Steps on the wire.** `Step` events become SSE `event: step` frames
 (`{id, node, status, label, detail}`), emitted as **running → done pairs sharing an `id`** so the
 client upserts one row instead of appending two. They are **ephemeral**: `ChatService` forwards

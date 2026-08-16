@@ -112,6 +112,14 @@ class Settings(BaseSettings):
     #   - "llm" can judge relevance in principle, but meta/llama-3.1-8b-instruct false-alarms on
     #     81% of correct retrievals (13/16 measured), fires on ~95% of queries, and costs a
     #     provider call each time. A bigger judge model may change that; this one does not.
+    #
+    # ⚠️ THE DEFAULT HAS A KNOWN COST, and it is not a small one. On questions the documents cannot
+    # answer, score-threshold lets the model answer anyway **61% of the time**, usually with a
+    # citation attached to an unrelated passage (scripts/eval_refusal.py,
+    # data/eval/reports/refusal-*.json). Switching to "llm" drops that to 0% — but refuses 70% of
+    # questions the documents *can* answer. There is no middle setting with this model: the llm
+    # grader prevents hallucination *by declining to answer*, so removing the refusal brings the
+    # hallucination straight back (measured: 0% -> 55%). Pick the failure you can live with.
     relevance_grader: Literal["score-threshold", "llm"] = "score-threshold"
     relevance_score_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
     agent_max_repairs: int = Field(default=1, ge=0)

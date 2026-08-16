@@ -41,7 +41,7 @@ This project is a complete, working implementation of that idea, with a web app 
 | 🌍 **Mix languages freely** | Ask in English, get answers from Chinese, Hindi, Arabic, or Thai documents |
 | 🔤 **Type Indic languages in English letters** | Romanized Hindi is detected and converted automatically. Kannada and Telugu are available too |
 | 💬 **Ask follow-ups** | "What about the second one?" works — it understands what you're referring to |
-| 📎 **Verify every claim** | Answers carry numbered citations linking back to the source passage |
+| 📎 **Verify every claim** | Answers carry numbered citations linking back to the source passage — and you should use them, see the honest limitation below |
 
 ---
 
@@ -371,6 +371,25 @@ So the agent is a **safety net, not a boost**: it cannot make retrieval worse (i
 attempt, never merely the last), it catches the empty-result case, and it refuses honestly instead
 of inventing an answer. What it genuinely bought was structural — one orchestration where there
 were three, and tenancy that a prompt can't talk its way past.
+
+### The honest limitation: it will answer questions your documents can't
+
+Ask something your documents don't cover and, **about 61% of the time, it answers anyway** — from
+the model's own knowledge, with a citation pointing at whichever passage happened to rank highest.
+The citation looks like evidence and isn't. Measured with `scripts/eval_refusal.py`.
+
+Turning it off is one setting, `RELEVANCE_GRADER=llm`, and it works completely — 0% hallucination.
+But it then refuses **70%** of questions your documents *do* answer, which is worse as a product.
+There's no middle: that grader avoids making things up by declining to answer, so you cannot keep
+the safety and drop the refusals (tried and measured; it goes straight back to 55%).
+
+The default therefore keeps the system useful and accepts the worse failure. That's a real
+tradeoff of small-model RAG rather than something a prompt fixes, and the numbers are in
+`data/eval/reports/` if you want to check the reasoning.
+
+Notably, **no automated test caught this** — every metric ran on a benchmark where every question
+has an answer, so a hallucination rate and a good recall score coexisted happily. It took someone
+uploading a document and asking an unrelated question.
 
 ### The bug this exercise found
 
