@@ -22,7 +22,7 @@ from fastapi import status
 from openai import OpenAIError
 
 from multilingual_rag.agent.events import Done, Step, Token, emit
-from multilingual_rag.agent.grading.base import RelevanceGrader
+from multilingual_rag.agent.grading.base import Grade, RelevanceGrader
 from multilingual_rag.agent.repair import (
     REPAIR_REWRITE_SYSTEM,
     RepairStrategy,
@@ -54,6 +54,22 @@ from multilingual_rag.retrieval.base import Retriever
 
 GradeRoute = Literal["generate", "repair", "generate_no_context"]
 EntryRoute = Literal["condense", "route_language"]
+
+
+def _is_better(new: Grade, best: Grade | None) -> bool:
+    """Should ``new`` replace the best attempt so far?
+
+    Only when it clears the bar that the incumbent failed. Deliberately **not** "higher top score
+    wins": comparing a transliterated search against a raw romanized one by cosine is the exact
+    *relative* judgement ``transliteration/detect.py`` records as unreliable — "the raw romanized
+    search finds enough high-cosine noise to look confident". Measured here: score-based selection
+    scored 0.750 recall@5 against 0.800 for the plain pipeline, i.e. it lost, reproducing that
+    finding. Using only the absolute relevant/weak verdict keeps the repair strictly opt-in — a
+    retry has to actually solve the problem to be adopted, and a tie always keeps the original.
+    """
+    if best is None:
+        return True
+    return new.relevant and not best.relevant
 
 
 class RagNodes:
@@ -183,17 +199,29 @@ class RagNodes:
         return {"context": context, "attempts": attempt}
 
     async def grade(self, state: AgentState) -> AgentUpdate:
-        """Judge whether the retrieval is worth answering from.
+        """Judge whether the retrieval is worth answering from, and keep the best attempt.
 
         Emits no step of its own: a passing grade is invisible to the user by design, and a
         failing one is announced by the repair step that follows.
+
+        **Never regress.** Generation answers from ``best_context``, not the latest one. A repair
+        is a bet, and it can lose: falling back to the raw romanized query is right only when the
+        transliterated search genuinely failed, and no grader separates those perfectly — the
+        score bands for correct and incorrect retrievals overlap (measured on XQuAD-hi: hits reach
+        down to 0.42, misses up to 0.46). Without this, a low-scoring *correct* retrieval gets
+        replaced by a worse one, and the agent scores below the plain pipeline. It did, before
+        this existed: recall@5 0.733 agentic vs 0.800 shipped. Now a repair can only help or tie.
         """
         context = state["context"]
         grade = await self.grader.grade(
             query=state["search_query"],
             results=context.results if context is not None else (),
         )
-        return {"grade": grade}
+        update: AgentUpdate = {"grade": grade}
+        if context is not None and _is_better(grade, state["best_grade"]):
+            update["best_grade"] = grade
+            update["best_context"] = context
+        return update
 
     async def repair(self, state: AgentState) -> AgentUpdate:
         """Change something about the search, then let the graph retry retrieval."""
@@ -318,8 +346,11 @@ class RagNodes:
 
     @staticmethod
     def _require_context(state: AgentState) -> RetrievalContext:
-        """Narrow ``context`` for mypy, and assert the invariant that retrieve ran first."""
-        context = state["context"]
+        """The attempt to answer from: the best one seen, not necessarily the last.
+
+        Also narrows for mypy and asserts the invariant that retrieve ran first.
+        """
+        context = state["best_context"] or state["context"]
         if context is None:  # pragma: no cover — retrieve always precedes generation
             raise AppError(
                 "The agent reached generation without retrieving.",

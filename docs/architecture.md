@@ -230,6 +230,13 @@ essentially never appear in English.
 
 **0.20 → 0.67 = 3.3×**; shipped ≈ the transliteration ceiling because detection recall is **98.7%**.
 
+> ⚠️ **These numbers are superseded.** They were measured when the harness generated its romanized
+> test queries with `indic_transliteration.sanscript` — the same library as the `rule-based`
+> adapter under test (§3). On human-written romanized queries the same shipped path scores **0.917
+> retention** (sampled: 60 queries / 3240 docs). The mechanism and the conclusion hold; the
+> magnitudes were pessimistic because the queries were unlike real input. Re-derive on the full
+> corpus before quoting a replacement.
+
 **Precision is prioritized** — a false positive would mis-transliterate a real English query, which
 is worse than missing a Hindi one. The marker list deliberately excludes English collisions (`the`,
 `is`, `to`, `me`, `par`, `ka`). No false positives were observed on the English control set (40
@@ -327,26 +334,48 @@ Dotted edges are conditional. `repair → retrieve → grade → repair` is a ge
 a structural property of the graph rather than a branch inside a node.
 
 **`repair` is the project-specific part.** Generic corrective RAG asks "rewrite the query?"; this
-asks **"was my script routing wrong?"** first, because that is the decision this pipeline exists to
-make. `agent/repair.py::choose_repair` is a pure function picking, cheapest-first:
+asked **"was my script routing wrong?"** first. **Measurement said that instinct was wrong**, and
+the ordering now reflects that: script routing is almost always *correct* (detection 98.3%,
+transliteration lifts recall 0.500 → 0.917), so a failed romanized query was usually rendered
+imperfectly, not misidentified. Leading with the raw-form retreat scored **0.767 against 0.800 for
+no agent at all**. `agent/repair.py::choose_repair` is a pure function picking:
 
-1. `raw_fallback` — the query *was* transliterated, so the transliterated search is what just
-   failed. Retry the raw form. Free (one embed, one search). Justified by measurement, not taste:
-   `scripts/eval_romanized.py` puts shipped retention at 0.747 against native 1.0, so a real
-   population of queries is *hurt* by transliterating.
-2. `relanguage` — a Latin-script query with more than one configured Indic language: the detector
+1. `relanguage` — a Latin-script query with more than one configured Indic language: the detector
    may have picked the wrong one. Correctly never fires on the default `hi`-only config.
-3. `rewrite` — one LLM call, a different prompt from condense.
+2. `rewrite` — one LLM call, a different prompt from condense.
+3. `raw_fallback` — last resort. A small population genuinely is hurt by transliterating, so it is
+   not worthless; raw romanized recall is only 0.500, so it is never a good first guess.
+
+A fourth strategy, `retransliterate` (retry through a second renderer), was built and then
+**removed**: its justification came from the rigged harness described in §3, and on honest queries
+it rescued 4 misses while breaking 3 — noise.
+
+With the default grader this only runs when retrieval returned *nothing at all*, so every strategy
+here is strictly safe: there is no incumbent result to damage.
 
 **Grading is a port** (`agent/grading/`). `ScoreThresholdGrader` is the default and costs nothing,
-which keeps a turn at two provider calls. Note this is *not* a contradiction of
-`transliteration/detect.py`'s finding that "score-based routing proved unreliable at scale": that
-was a **relative** judgement between two competing query forms, this is an **absolute** abstain
-check ("did anything clear the floor at all"). The honest limitation is recorded in
-`agent/grading/score_threshold.py` — bge-m3 cosine scores are not calibrated across languages, so
-one global floor is inherently more aggressive for one script than another. `LlmRelevanceGrader`
-is opt-in, costs one call per attempt, and **fails open**: an unparseable verdict or any
-`OpenAIError` grades as relevant, because a flaky judge must never cost the user an answer.
+which keeps a turn at two provider calls. `LlmRelevanceGrader` is opt-in, costs one call per
+attempt, and **fails open**: an unparseable verdict or any `OpenAIError` grades as relevant,
+because a flaky judge must never cost the user an answer.
+
+**The default floor is 0.0 — only an *empty* retrieval counts as weak — and that is a measured
+retreat, not a conservative guess.** The reasoning is worth reading before raising it:
+
+- The distinction from `transliteration/detect.py`'s "score-based routing proved unreliable at
+  scale" holds in principle: that was a **relative** judgement between two query forms, an abstain
+  check is **absolute**. But in practice the absolute version has the same problem here. On
+  XQuAD-hi the top-1 cosine bands overlap — correct retrievals run 0.424–0.696, incorrect ones
+  0.389–0.462 — so the best separating floor (0.45) fires on 14/60 queries of which only 8 are
+  real misses.
+- Acting on it **lost**: recall@5 0.767 against 0.800 for the plain pipeline, and that is the best
+  of three selection rules tried (0.733 → 0.750 → 0.767, all below 0.800). Full progression in
+  `docs/progress.md`.
+- So the free grader keeps only the arm it can defend. Real judgement needs a judge; that is what
+  `RELEVANCE_GRADER=llm` is for.
+
+**Never regress.** Generation answers from `best_context`, not the latest attempt: a repair is a
+bet and it can lose, so `grade` only promotes an attempt that flips weak→relevant. Deliberately
+*not* "higher score wins" — that is the cross-script comparison above, and it measurably failed.
 
 **Streaming.** Nodes emit `Token` / `Step` / `Done` onto LangGraph's single `custom` channel via
 `agent/events.py::emit`. Not `stream_mode="messages"` — that taps LangChain's callback manager for
@@ -374,9 +403,25 @@ deliberately plain-language ("Searching your documents") because a user reads th
 fact ("Hindi, typed in English letters") goes in `detail`, which the UI shows in its collapsed
 summary.
 
-**Settings.** `RELEVANCE_GRADER`, `RELEVANCE_SCORE_THRESHOLD` (default `0.35`), `AGENT_MAX_REPAIRS`
-(default `1`). ⚠️ The threshold is a conservative starting point, **not a measured optimum**, and
-it is now live. Calibrate it against the eval before trusting the repair loop's firing rate.
+**Settings.** `RELEVANCE_GRADER` (default `score-threshold`), `RELEVANCE_SCORE_THRESHOLD`
+(default `0.0`, see above), `AGENT_MAX_REPAIRS` (default `1`).
+
+**What this measures out at.** `scripts/eval_romanized.py` scores a fifth `agentic` condition by
+driving the real graph (generation stubbed, so the eval stays free). XQuAD-hi, 3240 docs, 60
+queries, human-written romanized queries, k=5:
+
+| native | romanized-raw | transliterated | shipped | **agentic** |
+|---|---|---|---|---|
+| 1.000 | 0.500 | 0.917 | 0.917 | **0.917** |
+
+**Parity**, with the repair loop firing 0/60. That is the honest result: the cycle is real and
+provably safe, and nothing on this corpus rewards it. Five configurations were measured before
+settling here — 0.733, 0.750, 0.767 (all *below* the plain pipeline), then parity twice. A win
+would need a stronger judge model than llama-3.1-8b, or `relanguage` with kn/te enabled.
+
+What the agent does buy, independent of retrieval quality: one orchestration instead of three,
+tenancy that cannot be prompt-injected, visible reasoning, a guarantee it can never return worse
+retrieval than the plain path, and an honest refusal when retrieval genuinely fails.
 
 ---
 
@@ -668,8 +713,49 @@ vector store directly). Two consequences:
 - Once the graph is wired, the headline `recall@k` will describe raw single-shot retrieval while
   production runs route → retrieve → grade → repair. It will no longer describe what ships.
 
-The planned fix is a fifth `agentic` condition in `scripts/eval_romanized.py`, which already scores
-native / romanized-raw / transliterated / shipped against a retention bar.
+**The fix, and what it found.** `scripts/eval_romanized.py` now scores a fifth `agentic` condition
+by driving the real `RagGraph` — same nodes, routers and repair logic as production, with only
+generation stubbed so the run stays free and offline. It earned its keep immediately: it caught the
+agent scoring *below* the plain pipeline and drove two design changes plus a default reversal
+before settling at parity (§1.9, full progression in `docs/progress.md`). `--relevance-threshold`
+and `--max-repairs` expose the knobs; a `CountingRetriever` reports how often repair actually fired.
+
+### 3.1 The romanization flaw — why older Indic numbers are superseded
+
+No romanized XQuAD exists, so the eval has to *synthesize* "what a person would type" from the
+native questions. It used to do that with `indic_transliteration.sanscript` — **which is also the
+`rule-based` transliteration adapter under test.** One of the things being measured was being fed
+input generated by its own character mapping. Measured effect: rule-based 0.950 vs google 0.700 on
+identical queries, a quarter of that lead pure artifact.
+
+It was also nothing like real input:
+
+```
+native     जोश नॉर्मन ने कितने बॉल को इंटरसेप्ट किया?
+sanscript  josa narmana ne kitane bala ko imtarasepta kiya?     <- nobody types this
+human      josh norman ne kitane ball co intercept kiya?
+```
+
+**Now:** queries are built word-by-word from **human-written** romanizations —
+`evaluation/romanization.py` over `data/eval/romanization_hi.json` (66 KB), generated by
+`scripts/build_romanization_lexicon.py` from Dakshina's crowd-collected per-word attestations plus
+a word-aligned Hindi↔roman parallel corpus. Neither involves `indic_transliteration`. 86% of query
+words are covered; uncovered words fall back to `rule_romanize`, and **every run prints that share**
+so the residual bias is visible rather than buried. The logic lives in the package, not `scripts/`,
+so it is covered by tests and `mypy --strict`.
+
+**Consequences for numbers already published:**
+
+- Shipped romanized retention is **much better** than recorded: 0.917 sampled, against 0.669. The
+  old figure was depressed by measuring against text nobody types.
+- The **0.747 acceptance bar is incomparable** and the script no longer prints PASS/FAIL against it.
+- The **kn/te figures carry the same bias** and cannot be re-derived — no kn/te human lexicon
+  exists yet.
+- All replacements so far are **sampled** (60 queries / 3240 docs). Re-derive on the full 150 /
+  20,240 before treating any of them as a baseline.
+
+`evaluation/harness.py` is still orchestration-blind. Teaching `run_live_evaluation` to accept a
+`Retriever` remains the way to close that.
 
 ```powershell
 python -m multilingual_rag.evaluation.run --live --langs en zh --k 5
@@ -745,6 +831,38 @@ All three must pass. mypy is `strict = true`; untyped third-party libs (celery, 
 `# type: ignore[...]` with the **specific** code. GitHub Actions runs all three plus the frontend
 lint/build on every push.
 
+**A bare `pytest` silently skips 15 tests** — 13 need Postgres, 2 need `RUN_MODEL_TESTS=1`. To run
+everything (227 tests, 0 skipped):
+
+```powershell
+docker compose up -d postgres redis
+$env:TMPDIR = "C:\tmp\rt"      # short path — see §8 on Windows path length
+$env:RUN_MODEL_TESTS = "1"     # real bge-m3
+python -m pytest
+```
+
+If that dies with a CUDA OOM or `Windows fatal exception: access violation`, nothing is broken —
+the machine is out of GPU/paging headroom, usually because an API or worker process is still
+holding a copy of bge-m3. Stop stray `python.exe` processes, or run the two model tests on their
+own:
+
+```powershell
+$env:RUN_MODEL_TESTS = "1"
+python -m pytest tests/integration/test_bge_embeddings.py tests/integration/test_chunker_cjk.py
+```
+
+Full-stack checks beyond the suite:
+
+```powershell
+alembic upgrade head
+python -m uvicorn multilingual_rag.api.app:app --host 127.0.0.1 --port 8000
+celery -A multilingual_rag.workers.celery_app.celery_app worker --loglevel=INFO --pool=solo
+python scripts/smoke_test.py --base-url http://127.0.0.1:8000
+```
+
+⚠️ On a single dev machine, run the worker and the API **one at a time** — see §8 on the paging
+file. Under `docker compose up --build` they are separate containers and this does not apply.
+
 ---
 
 ## 7. Directory reference
@@ -778,6 +896,15 @@ tests/                  unit/ · integration/ (no conftest.py)
 - **LangGraph silently ignores unknown keys** returned by a node, so a typo'd state key never
   raises — it just leaves the value stale. Hence the `AgentUpdate` TypedDict, which makes mypy
   catch it.
+- **The API and the worker each load their own bge-m3 (~2.2 GB).** Running both natively on one
+  dev machine can exhaust the Windows paging file: torch fails on `curand64_10.dll` with
+  `WinError 1455`, and the *worker* dies mid-ingestion while the API looks healthy — so the job
+  just sits at `running`. Under Compose each gets its own container and the image installs
+  CPU-only torch, so this is a local-dev issue only. Mitigate with
+  `WARM_EMBEDDINGS_ON_STARTUP=false`, or run ingestion and querying one at a time.
+- **Windows path length breaks the Chroma tests.** If pytest's temp dir is deep, the SQLite path
+  passes 260 chars and every `test_chroma_store.py` case fails with an opaque
+  `InternalError: SQL logic error`. Use a short `TMPDIR` (e.g. `C:\tmp\rt`).
 - **`/v1/query` is not chat-scoped** the way the chat path is — it searches all of a user's chunks.
   Two retrieval paths with different scoping semantics.
 - **`delete_chat_document`** passes `session_id` to the vector store, but `DocumentRepository.delete`

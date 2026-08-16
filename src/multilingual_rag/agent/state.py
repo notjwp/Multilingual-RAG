@@ -32,10 +32,17 @@ class AgentState(TypedDict):
     # ── accumulated ─────────────────────────────────────────────────────────
     search_query: str  # condense writes it; repair may rewrite it
     route: LanguageRoute | None
-    context: RetrievalContext | None
-    grade: Grade | None
+    context: RetrievalContext | None  # the most recent attempt
+    grade: Grade | None  # the most recent verdict; the repair router reads this one
     attempts: int
     tried_strategies: tuple[RepairStrategy, ...]
+
+    # The best attempt seen so far, which is what generation actually answers from. A repair can
+    # make retrieval *worse* — falling back to the raw romanized query is a good bet only when the
+    # transliterated search really did fail, and the grader cannot tell those apart perfectly. See
+    # the "never regress" note in nodes.py::grade.
+    best_context: RetrievalContext | None
+    best_grade: Grade | None
 
     # ── terminal ────────────────────────────────────────────────────────────
     answer: GeneratedAnswer | None
@@ -57,6 +64,8 @@ class AgentUpdate(TypedDict, total=False):
     route: LanguageRoute
     context: RetrievalContext
     grade: Grade
+    best_context: RetrievalContext
+    best_grade: Grade
     attempts: int
     tried_strategies: tuple[RepairStrategy, ...]
     answer: GeneratedAnswer

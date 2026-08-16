@@ -196,6 +196,8 @@ class RagGraph:
             route=None,
             context=None,
             grade=None,
+            best_context=None,
+            best_grade=None,
             attempts=0,
             tried_strategies=(),
             answer=None,

@@ -1,8 +1,15 @@
 """Opt-in relevance grading: ask the model whether the passages answer the question.
 
-Costs one extra provider call per retrieval attempt, so it is *not* the default — on a
-credit-based free tier a grade-and-retry turn can otherwise reach five calls. Enable with
-``RELEVANCE_GRADER=llm``.
+**Measured warning before you enable this.** With ``meta/llama-3.1-8b-instruct`` (the default
+generation model) it is not usable as a judge: on XQuAD-hi it graded **81% of *correct* retrievals
+as weak** (13 of 16), fired on 19/20 queries, and cost a provider call every time to be wrong four
+times in five. In isolation it does better — asked about a single gold passage it answered
+correctly 7/8 — but the real task is picking the relevant passage out of five mixed ones, and it
+fails that. A larger judge model may well work; this one does not, which is why the default is
+``score-threshold``.
+
+Costs one extra provider call per retrieval attempt — on a credit-based free tier a
+grade-and-retry turn can reach five calls. Enable with ``RELEVANCE_GRADER=llm``.
 
 **Fails open.** An unparseable verdict, or any ``OpenAIError``, grades the retrieval as relevant.
 A flaky judge must never block an answer the user could have had — the worst case of failing open
@@ -26,8 +33,13 @@ GRADER_SYSTEM = (
     "Judge only relevance to the question — not writing quality, completeness, or language."
 )
 
-# Enough to judge relevance without spending the context window on full passages.
-_SNIPPET_CHARS = 400
+# Long enough that the answer is actually *in* what the judge sees. This started at 400 and that
+# was a bug: 88% of XQuAD-hi passages are longer than that (median 658, p75 841), so the evidence
+# was being truncated away and the model then — correctly — reported that the passages did not
+# contain the answer. It graded gold documents "NO" about half the time and the repair loop fired
+# on 12/12 queries. 1500 covers essentially the whole corpus; at top_k=8 that is ~3k tokens, which
+# is nothing against a 128k window.
+_SNIPPET_CHARS = 1500
 
 
 def build_grader_prompt(query: str, results: Sequence[VectorSearchResult]) -> str:

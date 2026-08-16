@@ -77,6 +77,33 @@ CPU/IO into an event loop serializes it.
   — `langgraph.types` re-exports it at runtime but omits it from `__all__`.
 - **Conditional edges vs branches inside nodes.** "Skip condense on a first turn" is a conditional
   *entry edge*, so it shows up in `draw_mermaid()` and can't be quietly deleted.
+- **The repair loop is near-inert by default, on purpose.** `RELEVANCE_SCORE_THRESHOLD=0.0` means
+  only an empty retrieval triggers a retry. Positive floors were measured and lost — the cosine
+  bands for correct and incorrect retrievals overlap on XQuAD-hi, so the retry replaced correct
+  answers with worse ones. The `llm` grader is worse still at 8B (81% false alarms). Before
+  touching either, re-run `scripts/eval_romanized.py` and read `agent/grading/score_threshold.py`.
+
+## ●● Evaluation harness design — the trap this repo actually fell into
+
+Retrieval metrics are only as honest as the queries they run on, and this repo has a worked example
+of getting that wrong (`docs/architecture.md §3.1`).
+
+- **Never generate test inputs with a component under test.** `eval_romanized.py` synthesized
+  romanized queries with `indic_transliteration.sanscript`, which is also the `rule-based`
+  transliteration adapter — so that adapter was scored on inverting its own character mapping.
+  Result: 0.950 vs google's 0.700 on identical queries, and a *feature* (`retransliterate`) built
+  on the artifact and later deleted.
+- **Synthetic inputs drift from real ones in ways that change the answer.** IAST-stripped
+  Devanagari gives `josa narmana`; humans type `josh norman`. English loanwords staying in English
+  is exactly what bge-m3 can match cross-lingually, so the synthetic version understated the real
+  pipeline by a wide margin (0.669 → 0.917).
+- **Disclose residual bias in the output, not the commit message.** `romanize()` still falls back
+  to the rule-based scheme for ~14% of words, and every run prints that share.
+- **The habit:** before optimizing against a number, ask what would have to be true for it to be
+  wrong — and check that first. Roughly a day of this project's churn traces to skipping it.
+
+**Learn if unfamiliar:** recall@k / MRR / nDCG, distractor corpora, why a benchmark where every
+question has an answer in-corpus can't measure "did retrieval fail".
 
 **Learn if unfamiliar:** `StateGraph`, nodes vs edges, `add_conditional_edges`, cycles and
 `recursion_limit`, `astream` stream modes. Skip checkpointers and `ToolNode` — this graph

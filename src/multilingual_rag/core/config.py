@@ -100,12 +100,20 @@ class Settings(BaseSettings):
     retrieval_top_k: int = Field(default=8, gt=0)
 
     # Agentic retrieval loop: how a weak retrieval is detected, and how many repairs it may try.
-    # score-threshold is free (top cosine score, no LLM call) and is the default so the common
-    # case stays at two provider calls per turn; llm adds one call per retrieval attempt.
-    # The 0.35 floor is a conservative starting point, not a measured optimum — bge-m3 cosine
-    # scores are not calibrated across languages. See agent/grading/score_threshold.py.
+    # Both defaults below were set by measurement; neither is a hedge. See
+    # agent/grading/score_threshold.py for the distributions and scripts/eval_romanized.py to
+    # re-derive them.
+    #
+    # score-threshold + a 0.0 floor means only a *literally empty* retrieval counts as weak, so
+    # the repair loop almost never fires. That is the honest setting for this corpus:
+    #   - a cosine floor cannot separate "search failed" from "search worked but scored low" —
+    #     the bands overlap (correct 0.424-0.696, incorrect 0.389-0.462), and every positive floor
+    #     tried scored *below* having no agent at all (best: 0.767 vs 0.800)
+    #   - "llm" can judge relevance in principle, but meta/llama-3.1-8b-instruct false-alarms on
+    #     81% of correct retrievals (13/16 measured), fires on ~95% of queries, and costs a
+    #     provider call each time. A bigger judge model may change that; this one does not.
     relevance_grader: Literal["score-threshold", "llm"] = "score-threshold"
-    relevance_score_threshold: float = Field(default=0.35, ge=0.0, le=1.0)
+    relevance_score_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
     agent_max_repairs: int = Field(default=1, ge=0)
 
     # Multi-turn chat: how many prior messages to feed the answer model (and the query-rewrite

@@ -87,6 +87,7 @@ class FakeRetriever:
         self.queries: list[str] = []
         self.calls: list[tuple[str, str | None]] = []  # (user_id, session_id) per retrieval
         self.routes: list[LanguageRoute] = []
+        # (force_language, skip_transliteration) per route decision
         self.route_kwargs: list[tuple[str | None, bool]] = []
 
     def route(
@@ -209,17 +210,26 @@ def test_follow_up_condenses_then_retrieves_the_rewritten_query() -> None:
 # --- the agentic behaviour ---------------------------------------------------------------------
 
 
-def test_weak_retrieval_repairs_and_retries_with_a_different_route() -> None:
+def test_weak_retrieval_repairs_and_retries() -> None:
     retriever = FakeRetriever([_context(results=()), _context()])
     graph = _graph(retriever=retriever, grader=FakeGrader(False, True))
 
     events = asyncio.run(_collect(graph.stream("bharat ki rajdhani kya hai", user_id="user-1")))
 
     assert len(retriever.queries) == 2  # the cycle ran exactly once
-    # First route transliterated; the repair retried the raw form instead.
-    assert retriever.route_kwargs == [(None, False), (None, True)]
     assert ("repair", "done") in _steps(events)
     assert [e for e in events if isinstance(e, Done)]  # still answered
+
+
+def test_the_first_repair_is_not_a_retreat_to_the_raw_query() -> None:
+    # raw_fallback is the last resort, never the opener: leading with it measured 0.767 against
+    # 0.800 for no agent at all, because raw romanized recall is 0.133. See agent/repair.py.
+    retriever = FakeRetriever([_context(results=()), _context()])
+    graph = _graph(retriever=retriever, grader=FakeGrader(False, True))
+
+    asyncio.run(_collect(graph.stream("bharat ki rajdhani kya hai", user_id="user-1")))
+
+    assert all(not skip_transliteration for _, skip_transliteration in retriever.route_kwargs)
 
 
 def test_exhausted_repairs_answer_without_context_and_cite_nothing() -> None:
@@ -232,6 +242,58 @@ def test_exhausted_repairs_answer_without_context_and_cite_nothing() -> None:
     assert len(retriever.queries) == 2  # one repair (agent_max_repairs default 1), then stop
     done = [e for e in events if isinstance(e, Done)]
     assert done[0].answer.citations == ()  # the give-up path cannot cite
+
+
+def test_a_repair_that_retrieves_worse_does_not_lose_the_better_attempt() -> None:
+    # The regression this pins: a repair is a bet and it can lose. Falling back to the raw
+    # romanized query is right only when the transliterated search genuinely failed, and the score
+    # bands overlap, so the grader mislabels some correct retrievals as weak. Measured on XQuAD-hi
+    # before this existed: agentic recall@5 0.733 vs 0.800 for the plain pipeline. Generation must
+    # answer from the best attempt, never merely the last.
+    good = _context(results=(_result("good:0", score=0.44),))
+    worse = _context(results=(_result("worse:0", score=0.05),))
+    graph = _graph(
+        retriever=FakeRetriever([good, worse]),
+        # Both attempts graded weak, but the first scored far higher.
+        grader=FakeGrader(False, False),
+        settings=Settings(environment="test", agent_max_repairs=1),
+    )
+
+    result = asyncio.run(graph.answer("bharat ki rajdhani kya hai", user_id="user-1"))
+
+    assert result.context.results[0].chunk_id == "good:0"
+
+
+def test_a_tie_keeps_the_original_attempt() -> None:
+    # The subtle case the two neighbours don't cover. When both attempts grade the same, the
+    # incumbent wins — deliberately *not* "higher score wins", because ranking a transliterated
+    # search against a raw one by cosine is the relative judgement transliteration/detect.py
+    # records as unreliable, and it measured 0.750 vs 0.800 when tried.
+    first = _context(results=(_result("first:0", score=0.20),))
+    second = _context(results=(_result("second:0", score=0.99),))  # higher score, same verdict
+    graph = _graph(
+        retriever=FakeRetriever([first, second]),
+        grader=FakeGrader(False, False),
+        settings=Settings(environment="test", agent_max_repairs=1),
+    )
+
+    result = asyncio.run(graph.answer("bharat ki rajdhani kya hai", user_id="user-1"))
+
+    assert result.context.results[0].chunk_id == "first:0"
+
+
+def test_a_repair_that_retrieves_better_is_adopted() -> None:
+    weak = _context(results=(_result("weak:0", score=0.10),))
+    strong = _context(results=(_result("strong:0", score=0.90),))
+    graph = _graph(
+        retriever=FakeRetriever([weak, strong]),
+        grader=FakeGrader(False, True),
+        settings=Settings(environment="test", agent_max_repairs=1),
+    )
+
+    result = asyncio.run(graph.answer("bharat ki rajdhani kya hai", user_id="user-1"))
+
+    assert result.context.results[0].chunk_id == "strong:0"
 
 
 def test_max_repairs_zero_disables_the_cycle_entirely() -> None:

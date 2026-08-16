@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator, Sequence
 from openai import APIError
 
 from multilingual_rag.agent.grading.factory import build_relevance_grader
-from multilingual_rag.agent.grading.llm import LlmRelevanceGrader
+from multilingual_rag.agent.grading.llm import LlmRelevanceGrader, build_grader_prompt
 from multilingual_rag.agent.grading.score_threshold import ScoreThresholdGrader
 from multilingual_rag.core.config import Settings
 from multilingual_rag.core.models import ConversationTurn, VectorSearchResult
@@ -134,11 +134,18 @@ def test_llm_grader_skips_the_call_entirely_when_nothing_was_retrieved() -> None
 # --- factory -----------------------------------------------------------------------------------
 
 
-def test_factory_defaults_to_the_free_score_threshold_grader() -> None:
+def test_factory_defaults_to_the_free_score_threshold_grader_at_a_zero_floor() -> None:
+    """Both halves of this default are measured, not cautious. The llm grader false-alarms on 81%
+    of correct retrievals with llama-3.1-8b, and every positive cosine floor tried scored below
+    having no agent at all (best 0.767 vs 0.800) because the score bands overlap. A 0.0 floor
+    means only a *literally empty* retrieval is graded weak — the one signal cosine can be
+    trusted on — so the repair loop cannot fire on a hunch."""
     grader = build_relevance_grader(Settings(), client=FakeStreamClient())
 
     assert isinstance(grader, ScoreThresholdGrader)
-    assert grader.threshold == 0.35
+    assert grader.threshold == 0.0
+    assert asyncio.run(grader.grade(query="q", results=(_result("c1", 0.01),))).relevant is True
+    assert asyncio.run(grader.grade(query="q", results=())).relevant is False
 
 
 def test_factory_selects_the_llm_grader_when_configured() -> None:
@@ -147,3 +154,29 @@ def test_factory_selects_the_llm_grader_when_configured() -> None:
     )
 
     assert isinstance(grader, LlmRelevanceGrader)
+
+
+# --- the prompt the judge actually sees ----------------------------------------------------------
+
+
+def test_the_grader_prompt_does_not_truncate_a_realistic_passage() -> None:
+    """Regression: the snippet cap was 400 chars while 88% of XQuAD passages are longer (median
+    658). The evidence was being cut out before the judge saw it, so it correctly answered that
+    the passages did not contain the answer — grading *gold* documents "NO" about half the time
+    and firing the repair loop on 12/12 queries."""
+    answer = "THE-ANSWER-IS-HERE"
+    passage = ("filler " * 120) + answer  # ~860 chars, the answer at the very end
+
+    prompt = build_grader_prompt("what is the answer?", (_result("c1", 0.5, text=passage),))
+
+    assert answer in prompt
+
+
+def test_the_grader_prompt_carries_the_question_and_numbers_the_passages() -> None:
+    prompt = build_grader_prompt(
+        "who founded it?", (_result("c1", 0.9, text="alpha"), _result("c2", 0.8, text="beta"))
+    )
+
+    assert "who founded it?" in prompt
+    assert "[1] alpha" in prompt
+    assert "[2] beta" in prompt

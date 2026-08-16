@@ -1,9 +1,10 @@
 """LLM roman->native transliteration (opt-in; costs generation credits).
 
-Reuses the same OpenAI-compatible ``ChatClient`` as answer generation. This is the spike's
-proven-0.747 path, but it adds a model call + credits + latency to *every* romanized query, so
-it is opt-in (``TRANSLITERATION_PROVIDER=llm``) and never the default under the "free, ever"
-constraint.
+Reuses the same OpenAI-compatible ``ChatClient`` as answer generation. The original spike measured
+this as the strongest path (0.747 retention there), but that figure predates the romanization fix
+in ``evaluation/romanization.py`` and has not been re-derived. It also adds a model call + credits
++ latency to *every* romanized query, so it is opt-in (``TRANSLITERATION_PROVIDER=llm``) and never
+the default under the "free, ever" constraint.
 """
 
 from __future__ import annotations

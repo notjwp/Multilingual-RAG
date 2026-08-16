@@ -15,7 +15,7 @@ from typing import Literal
 from multilingual_rag.retrieval.routing import LanguageRoute
 from multilingual_rag.transliteration.script import is_latin_script
 
-RepairStrategy = Literal["raw_fallback", "relanguage", "rewrite"]
+RepairStrategy = Literal["relanguage", "rewrite", "raw_fallback"]
 
 # Plain-language names for the agent step detail shown in the chat UI.
 LANGUAGE_NAMES: dict[str, str] = {"hi": "Hindi", "kn": "Kannada", "te": "Telugu"}
@@ -55,23 +55,32 @@ def choose_repair(
     configured_languages: tuple[str, ...],
     tried: tuple[RepairStrategy, ...],
 ) -> RepairStrategy | None:
-    """Pick the next repair strategy, cheapest-and-most-evidenced first, or None when exhausted.
+    """Pick the next repair strategy, or None when they are exhausted.
 
-    1. ``raw_fallback`` — the query *was* transliterated, so the transliterated search is the
-       thing that just failed. Retry the raw form. Free: one embed, one search, no LLM call.
-       This is not decorative — ``scripts/eval_romanized.py`` measures shipped retention at 0.747
-       against native 1.0, so there is a measured population of queries where transliterating
-       made retrieval worse.
-    2. ``relanguage`` — a Latin-script query with more than one configured Indic language: the
-       detector may have picked the wrong one. Re-route to another and transliterate to that
-       script. With the default ``TRANSLITERATION_LANGUAGES=("hi",)`` this correctly never fires;
-       it comes alive with ``hi,kn,te`` plus the muril or google detector.
-    3. ``rewrite`` — always available. One LLM call, a *different* prompt from condense.
+    **The ordering was set by measurement, against my first instinct.** The original version led
+    with ``raw_fallback`` on the story "was my script routing wrong?" — which sounded right and
+    was wrong. The data says script routing is almost always *correct*: detection scores 98.3%
+    and transliteration lifts recall 0.500 -> 0.917 on XQuAD-hi. So a failed romanized query is
+    usually one that was correctly identified and then rendered imperfectly, not one that should
+    have been left in Latin script. Leading with the raw form retreats to the worst option on the
+    board, and end-to-end it lost: recall@5 0.767 against 0.800 for no agent at all.
+
+    1. ``relanguage`` — a Latin-script query with more than one configured Indic language: the
+       detector may have picked the wrong one. With the default hi-only
+       ``TRANSLITERATION_LANGUAGES`` this correctly never fires; it comes alive with ``hi,kn,te``
+       plus the muril or google detector.
+    2. ``rewrite`` — one LLM call, a *different* prompt from condense.
+    3. ``raw_fallback`` — last resort. There *is* a small population where transliteration hurt,
+       so it is not worthless; it is just a bad first guess.
 
     A strategy is never tried twice in one turn.
+
+    **Note on scope.** With the default grader (``score-threshold`` at a 0.0 floor) this only runs
+    when retrieval returned *nothing at all*, so every strategy here is strictly safe — there is
+    no incumbent result to damage. See ``agent/grading/score_threshold.py`` for why the floor is
+    where it is.
     """
-    if "raw_fallback" not in tried and route is not None and route.transliteration_applied:
-        return "raw_fallback"
+    transliterated = route is not None and route.transliteration_applied
 
     if (
         "relanguage" not in tried
@@ -84,5 +93,8 @@ def choose_repair(
 
     if "rewrite" not in tried:
         return "rewrite"
+
+    if "raw_fallback" not in tried and transliterated:
+        return "raw_fallback"
 
     return None

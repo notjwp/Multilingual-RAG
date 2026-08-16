@@ -9,15 +9,28 @@ noise to look confident)". That finding stands, and it is not this.
 - This grader makes an *absolute* abstain check: did anything at all clear the floor. Different
   question, different failure mode.
 
-So the check is deliberately conservative and fails open — it fires on unambiguous misses only:
+So the check is deliberately conservative and fires on unambiguous misses only:
 
 - ``not results`` → weak. No threshold involved; this case is 100% reliable.
-- ``max(score) < threshold`` → weak.
+- ``max(score) < threshold`` → weak. **The threshold defaults to 0.0, so this arm is off.**
 
-**Known limitation, stated rather than hidden:** bge-m3 cosine scores are *not calibrated across
-languages*. A Devanagari query and an English query have different score distributions against the
-same corpus, so a single global floor is inherently more aggressive for one than the other. The
-default is set low for that reason; ``RELEVANCE_SCORE_THRESHOLD`` is the knob.
+**Why the threshold defaults to off — measured, not assumed.** On XQuAD-hi (3240 docs, 60 queries)
+the top-1 cosine bands for correct and incorrect retrievals overlap badly:
+
+    attempt        min    p25    median   max
+    hit  (n=49)    0.424  0.475  0.524    0.696
+    miss (n=11)    0.389  0.415  0.431    0.462
+
+At the best separating floor (0.45) the check fires on 14/60 queries and only 8 of those are real
+misses — so it condemns 6 correct retrievals, and the raw-query fallback it triggers replaces them
+with something worse. End to end that *lost*: recall@5 0.767 against 0.800 for the plain pipeline,
+across three different rules for choosing between attempts. This is the same effect
+``transliteration/detect.py`` records — "the raw romanized search finds enough high-cosine noise
+to look confident" — and it does not go away by moving the number.
+
+An absolute abstain check is still a different question from that *relative* one, and the empty
+case answers it perfectly. So the free grader keeps only the arm it can defend. Real judgement
+needs a judge: ``RELEVANCE_GRADER=llm``.
 """
 
 from __future__ import annotations

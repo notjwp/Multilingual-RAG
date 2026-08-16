@@ -197,7 +197,7 @@ Everything lives in `.env` (copy it from `.env.example`). The settings you're mo
 | `JWT_SECRET_KEY` | Login-token signing key. **Must** be changed for real deployments |
 | `RETRIEVAL_TOP_K` | How many passages to feed the model (default: 8) |
 | `RELEVANCE_GRADER` | How the agent judges a search: `score-threshold` (free, default) or `llm` |
-| `RELEVANCE_SCORE_THRESHOLD` | Below this score a search counts as weak and triggers a retry (default: 0.35, untuned) |
+| `RELEVANCE_SCORE_THRESHOLD` | Below this score a search counts as weak and triggers a retry. Default `0.0` = only retry on an empty result; higher values were measured and made things worse |
 | `AGENT_MAX_REPAIRS` | How many retries per question (default: 1 — raising it multiplies cost) |
 
 ---
@@ -339,18 +339,55 @@ You can watch it work: the chat shows what it's doing as it goes, then collapses
 ✓ Understanding your question
 ✓ Recognizing the language      · Hindi, typed in English letters
 ✓ Searching your documents      · 8 passages found
-⚠ Didn't find much — trying again · searching your original wording instead
+⚠ Didn't find much — trying again · rephrasing the search
 ✓ Searching again               · 6 passages found
 ✓ Writing the answer
 ```
 
-By default the "was that good enough?" check is free — it uses the search scores already at hand,
-no extra model call — so a normal answer still costs two calls, not five. An LLM-based judge is
-available via `RELEVANCE_GRADER=llm` if you'd rather trade credits for judgement.
+By default the "was that good enough?" check is free — no extra model call — so a normal answer
+still costs two calls, not five. An LLM judge is available via `RELEVANCE_GRADER=llm` if you'd
+rather trade credits for real judgement.
 
-**Honest status:** the machinery is built, wired, and unit-tested end to end, but the retry
-threshold (`RELEVANCE_SCORE_THRESHOLD`) is still an untuned default, and there's no published
-measurement yet of how much the retry loop actually helps. See `docs/progress.md`.
+### What it measures out at — and why that's a "no change"
+
+| | recall@5 |
+|---|---|
+| Devanagari question (the ceiling) | 1.000 |
+| Typed in English letters, searched as-is | 0.500 |
+| Converted to Devanagari first | 0.917 |
+| **Without the agent** | **0.917** |
+| **With the agent** | **0.917** |
+
+Parity. The agent doesn't improve retrieval here, and the reason is worth stating plainly: the
+check can't reliably tell *"this search failed"* from *"this search worked but scored low."* Those
+two overlap almost completely. Every threshold that catches real failures also condemns correct
+answers — and the retry it triggers is worse than what it replaced, so the agent scored **below**
+the plain pipeline until the default was pulled back to "only retry when the search returned
+literally nothing."
+
+So the agent is a **safety net, not a boost**: it cannot make retrieval worse (it keeps the best
+attempt, never merely the last), it catches the empty-result case, and it refuses honestly instead
+of inventing an answer. What it genuinely bought was structural — one orchestration where there
+were three, and tenancy that a prompt can't talk its way past.
+
+### The bug this exercise found
+
+Building that evaluation turned up something more valuable than the feature. The harness had been
+generating its romanized test queries with the *same library* as one of the transliteration
+adapters it was scoring — marking its own homework, worth about +0.25 recall to that adapter. It
+also produced text nobody types: `josa narmana` where a person writes `josh norman`.
+
+Queries now come from **human-written** romanizations (Google's Dakshina dataset plus a parallel
+corpus). Fixing it revealed the multilingual path was substantially better than this README had
+been claiming — romanized retention went from a reported 0.669 to **0.917** — and simultaneously
+invalidated the justification for a feature that had just been built, which was then removed.
+
+⚠️ These are **sampled** figures (60 queries against 3,240 documents), not the full-corpus
+baseline. Reproduce with:
+
+```powershell
+python scripts/eval_romanized.py --sample 60 --distractor-cap 3000
+```
 
 ---
 
