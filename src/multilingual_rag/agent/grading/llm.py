@@ -1,15 +1,36 @@
-"""Opt-in relevance grading: ask the model whether the passages answer the question.
+"""The default relevance grader: ask the model whether the passages answer the question.
 
-**Measured warning before you enable this.** With ``meta/llama-3.1-8b-instruct`` (the default
-generation model) it is not usable as a judge: on XQuAD-hi it graded **81% of *correct* retrievals
-as weak** (13 of 16), fired on 19/20 queries, and cost a provider call every time to be wrong four
-times in five. In isolation it does better — asked about a single gold passage it answered
-correctly 7/8 — but the real task is picking the relevant passage out of five mixed ones, and it
-fails that. A larger judge model may well work; this one does not, which is why the default is
-``score-threshold``.
+This is the shipped default (``RELEVANCE_GRADER=llm``), chosen on refusal quality — it is the only
+configuration measured that never fabricates a cited answer to an out-of-corpus question. It costs
+one provider call per retrieval attempt, so a grade-and-retry turn reaches ~3 calls.
 
-Costs one extra provider call per retrieval attempt — on a credit-based free tier a
-grade-and-retry turn can reach five calls. Enable with ``RELEVANCE_GRADER=llm``.
+**It is a poor judge, and that is the accepted cost.** With ``meta/llama-3.1-8b-instruct`` it
+grades **81% of *correct* retrievals weak** (13 of 16) and says NO to 17 of 20 queries — which is
+the 70% false-refusal rate the product ships with. The same model asked about a *single* passage
+is right 7/8; it fails at picking the relevant passage out of five mixed ones.
+
+**Do not re-propose a selection prompt.** The obvious inference from that 7/8 — ask "which
+passages help, reply with numbers or NONE" and play to the strength — was built, measured, and
+reverted. It works in the direction predicted and still loses:
+
+===========================  ==============  ====================  ==============
+prompt                       false alarms    fabricates            refuses answerable
+===========================  ==============  ====================  ==============
+set-level YES/NO (shipped)   81% (13/16)     0%                    70%
+selection, numbers or NONE   56% (9/16)      **20%**               50%
+===========================  ==============  ====================  ==============
+
+The reframing did not make the judge *more accurate*, it made it **more permissive** — it dropped
+wrong weak grades and right ones together (catches fell 4/4 -> 3/4, which reads as noise at n=4 and
+as four fabricated answers at n=20). Trading the 0% fabrication rate for halved refusals reverses
+the reason this grader is the default at all. Reports:
+``data/eval/reports/grader-llama31-8b-selection.json`` and ``refusal-llm-selection.json``.
+
+So this judge's errors cannot be separated into "wrong refusals" and "right refusals" by
+prompting; a stronger judge model is the only route left. Re-measure with
+``scripts/eval_grader.py`` after touching the prompt — the bar is two-sided (false alarms <20% AND
+catches >=50%) precisely because this grader fails open, so a model that errors on every call would
+otherwise post a flawless false-alarm rate.
 
 **Fails open.** An unparseable verdict, or any ``OpenAIError``, grades the retrieval as relevant.
 A flaky judge must never block an answer the user could have had — the worst case of failing open

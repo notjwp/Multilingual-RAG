@@ -189,3 +189,22 @@ def test_the_grader_prompt_carries_the_question_and_numbers_the_passages() -> No
     assert "who founded it?" in prompt
     assert "[1] alpha" in prompt
     assert "[2] beta" in prompt
+
+
+# --- the selection prompt that was tried and reverted --------------------------------------------
+
+
+def test_the_grader_asks_for_a_set_level_verdict_not_a_passage_selection() -> None:
+    """Pins the reverted experiment so it is not silently reintroduced.
+
+    Asking "which passages help, reply with numbers or NONE" is the obvious inference from this
+    model scoring 7/8 on single passages while failing on mixed sets. It was built and measured:
+    false alarms improved 81% -> 56% and false refusals 70% -> 50%, but fabrication went
+    **0% -> 20%**, because the reframing made the judge more *permissive* rather than more
+    *accurate* — it shed right weak grades along with wrong ones. That trades away the one property
+    this grader is the default for. See the module docstring and
+    data/eval/reports/*-selection.json.
+    """
+    prompt = build_grader_prompt("q", (_result("c1", 0.9, text="alpha"),))
+
+    assert "YES/NO" in prompt

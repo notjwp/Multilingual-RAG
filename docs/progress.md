@@ -796,9 +796,30 @@ recorded above predate the flip and are `score-threshold` measurements. They wer
 because XQuAD has no unanswerable questions and the new default's entire behaviour is to refuse —
 it would score worse there by construction, and that would not be a regression.
 
+**Selection prompt — third attempt, reverted (2026-08-17).** `llm.py` records that the judge is
+right 7/8 on a *single* passage but fails at picking one out of five, so the set-level YES/NO
+framing looked like the bottleneck. Asked instead for *which* passages help (numbers, or NONE):
+
+| prompt | false alarms | fabricates | refuses answerable |
+|---|---|---|---|
+| set-level YES/NO (shipped) | 81% (13/16) | **0%** | 70% |
+| selection, numbers or NONE | 56% (9/16) | **20%** | 50% |
+
+Every number moved as predicted and it still lost. The reframing made the judge more *permissive*,
+not more *accurate* — it shed correct weak grades along with incorrect ones (catches 4/4 → 3/4,
+noise at n=4, four fabricated answers at n=20). Code reverted to byte-identical behaviour; the
+docstring, a pinning test, and both reports kept.
+
+**The mistake is the useful part.** I argued the change was safe *by construction* because the
+refusal policy was untouched. That is false reasoning: policy decides what happens given a weak
+grade, not how often weak grades occur. `eval_grader.py` alone made it look like a pure win — its
+false-alarm/catch view cannot see fabrication. Anything touching `agent/grading/` needs
+`eval_refusal.py` too.
+
 Unmeasured routes out: a generation model that actually obeys "answer only from context", or a
-judge that clears the bar (none reachable does). A better judge improves the default *and* the
-gate at once — the highest-leverage change left.
+judge that clears the bar (none reachable does). Now that prompting has been ruled out, a better
+judge model is the *only* remaining route — and it improves the default and the grounding gate at
+once.
 
 Two bugs fell out of building this, both real and both fixed:
 - **`generation_stream_corrupt`** — a malformed SSE frame raises `json.JSONDecodeError`, a

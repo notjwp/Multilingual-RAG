@@ -482,6 +482,29 @@ Two structural consequences worth knowing even though the gate is off:
   answer was wrong, and failing closed would turn one provider blip into every answer in the
   product becoming a refusal.
 
+**A selection prompt is the third dead end, and the most instructive.** `llm.py`'s docstring
+records that the judge scores 7/8 on a *single* passage but fails at picking one out of five
+mixed — so the obvious move is to stop asking a set-level YES/NO and instead ask *which* passages
+help ("numbers, or NONE"), playing to the strength. Built, measured, reverted:
+
+| prompt | false alarms | fabricates | refuses answerable |
+| --- | --- | --- | --- |
+| set-level YES/NO (shipped) | 81% (13/16) | **0%** | 70% |
+| selection, numbers or NONE | 56% (9/16) | **20%** | 50% |
+
+It moved every number in the predicted direction and still lost. The reframing did not make the
+judge more *accurate*; it made it more *permissive*, shedding correct weak grades along with
+incorrect ones — the catch rate fell 4/4 → 3/4, dismissible as noise at n=4 and visible as four
+fabricated answers at n=20. Halving refusals by giving up the 0% rate reverses the reason this
+grader is the default.
+
+The methodological lesson is worth more than the result: **"the refusal policy is unchanged, so
+hallucination cannot rise" is false reasoning**, and it was stated confidently before this run.
+Policy governs what happens *given* a weak grade; it has no effect on how often weak grades occur.
+Any change under `agent/grading/` moves both rates and needs `scripts/eval_refusal.py`, not just
+`scripts/eval_grader.py` — the latter's one-sided view is what made the change look safe.
+Reports: `grader-llama31-8b-selection.json`, `refusal-llm-selection.json`.
+
 **So the two graders are the real choice, and they cross at `p ≈ 0.55`.** Below that — a corpus
 that often lacks the answer — `llm` wins; above it, `score-threshold` wins, and at `p = 0.9` it
 wins decisively (75% vs 37%). **The shipped default is `llm`**, which is the *worse* choice for a

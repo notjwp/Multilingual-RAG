@@ -1,0 +1,15 @@
+{
+  "catch_bar": 0.5,
+  "catch_rate": 0.75,
+  "catches": 3,
+  "documents": 3240,
+  "false_alarm_bar": 0.2,
+  "false_alarm_rate": 0.5625,
+  "false_alarms": 9,
+  "graded_weak": 12,
+  "hits": 16,
+  "lang": "hi",
+  "model": "meta/llama-3.1-8b-instruct",
+  "queries": 20,
+  "verdict": "UNUSABLE"
+}
