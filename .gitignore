@@ -42,3 +42,44 @@ desktop.ini
 .idea/
 .vscode/
 *.swp
+*.swo
+
+# Local env overrides. Bare `.env` was not enough: a `.env.local` or `.env.production` holding a
+# real GENERATION_API_KEY would have been committed. `.env.example` is the deliberate exception —
+# it is the documented template and carries no secrets.
+.env.*
+!.env.example
+
+# Machine-local Claude Code settings. Previously ignored only by a *global* gitignore on the
+# original dev machine, so a fresh clone or a CI checkout would have offered it up as untracked.
+# `.claude/` itself stays trackable — only this file is machine-specific.
+.claude/settings.local.json
+
+# Alternate virtualenv names, so a clone that runs `python -m venv venv` (rather than `.venv`)
+# doesn't stage a few hundred MB of site-packages.
+venv/
+env/
+ENV/
+.python-version
+
+# Packaging and test-runner leftovers not covered by the caches above.
+.eggs/
+*.egg
+pip-wheel-metadata/
+.tox/
+.nox/
+.hypothesis/
+.coverage.*
+coverage.xml
+junit*.xml
+
+# Local service state, for running Postgres/Redis/Celery outside docker compose.
+dump.rdb
+celerybeat-schedule*
+celerybeat.pid
+
+# Merge and patch leftovers — the easiest thing to commit by accident during a conflict.
+*.orig
+*.rej
+*.bak
+*~

@@ -398,11 +398,25 @@ Measured with `scripts/eval_refusal.py`, 20 questions per set:
 | `RELEVANCE_GRADER=score-threshold` | 61% | **21%** | 1 |
 | `GROUNDING_GATE=true` | 40% | 55% | 2 |
 
-There is no free point between them. The llm grader avoids fabricating *by declining to answer* —
-keep its judgement but answer anyway and hallucination returns immediately (measured: 0% → 55%,
-reverted). The grounding gate, which judges the finished answer instead of the retrieval, is
-dominated at every query mix: better than `score-threshold` only below a 38% answerable share,
-better than `llm` only above 73%, and those don't overlap.
+There is no free point between them, and three separate attempts to find one have been measured
+and reverted:
+
+1. **Keep the grader's judgement but answer anyway** when retrieval isn't empty — hallucination
+   returns immediately (0% → 55%). The grader avoids fabricating *by declining to answer*; that is
+   the entire mechanism, so you cannot keep the safety and drop the refusals.
+2. **Judge the finished answer** instead of the retrieval (`GROUNDING_GATE`) — dominated at every
+   query mix: better than `score-threshold` only below a 38% answerable share, better than `llm`
+   only above 73%, and those ranges don't overlap.
+3. **Ask the judge a better question** — the model is right 7/8 about a *single* passage but fails
+   at picking one out of five, so the set-level yes/no was the obvious suspect. Asking *which*
+   passages help cut false refusals 70% → 50%, and pushed fabrication 0% → 20%. It made the judge
+   more permissive rather than more accurate.
+
+Attempt 3 is the informative one: it means **prompting is now ruled out by evidence rather than
+untried**, and a stronger judge model is the only route left. It also produced the most useful
+correction in this project — "the refusal policy is unchanged, so hallucination can't rise" is
+false reasoning. Policy decides what happens *given* a weak grade; it has no bearing on how often
+weak grades occur.
 
 **Which default is right depends on your corpus.** The two graders cross at roughly a 55%
 answerable share. If your users mostly ask about a document they just uploaded, `score-threshold`
