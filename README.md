@@ -54,7 +54,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Then open **http://localhost:3000** and sign up.
+Then open the web app on **port 3000** and sign up.
 
 > **One optional step for full functionality.** Searching your documents works immediately, but
 > *writing answers* needs a language model. Grab a **free** key from
@@ -176,7 +176,7 @@ Switching providers is a URL change in `.env`, not a code change.
 | **NVIDIA NIM** (default) | Free tier, no card | `https://integrate.api.nvidia.com/v1` |
 | OpenRouter | Free tier available | `https://openrouter.ai/api/v1` |
 | Groq | Free tier, very fast | `https://api.groq.com/openai/v1` |
-| Ollama | Free, fully offline | `http://localhost:11434/v1` |
+| Ollama | Free, fully offline | your Ollama host on port `11434`, path `/v1` |
 | OpenAI | Paid | `https://api.openai.com/v1` |
 
 Searching your documents is always free and always local — only answer-writing calls a provider.

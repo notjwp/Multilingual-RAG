@@ -13,10 +13,10 @@ see the root README). Then:
 
 ```bash
 npm install
-npm run dev            # http://localhost:3000
+npm run dev            # serves on port 3000
 ```
 
-Set `NEXT_PUBLIC_API_BASE_URL` in `.env.local` if the API isn't at `http://localhost:8000`. It is
+Set `NEXT_PUBLIC_API_BASE_URL` in `.env.local` if the API isn't on port `8000` of the same host. It is
 baked into the client bundle at build time, so it must be the URL the **browser** uses.
 
 Or run the whole stack (Postgres · Redis · API · worker · frontend) with one command from the repo
